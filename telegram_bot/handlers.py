@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 import time
 from contextlib import suppress
 from typing import cast
@@ -13,6 +15,8 @@ from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 
+from agents.database import count_conversations, count_users
+from agents.llm_config import LLMConfig
 from agents.multi_agent import (
     MultiAgentState,
     build_initial_multi_agent_state,
@@ -25,11 +29,14 @@ from agents.metrics import (
     agent_requests_total,
     observe_token_usage,
 )
+from agents.roles import get_role, list_admins, remove_role, set_role
+from telegram_bot.middlewares.role_check import require_role
 
 logger = logging.getLogger(__name__)
 router = Router()
 multi_agent_graph = build_multi_agent_graph()
 chat_memory = ChatMemory(max_messages=20)
+PROCESS_STARTED_AT = time.time()
 
 
 def _format_result_markdown(result: MultiAgentState) -> str:
@@ -130,6 +137,91 @@ async def clear_history_handler(message: Message) -> None:
         f"История очищена. Удалено сообщений: {deleted}.",
         parse_mode=ParseMode.MARKDOWN,
     )
+
+
+@router.message(Command("me"))
+async def me_handler(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role = get_role(user_id)
+    await message.answer(f"Твоя роль: `{role}` (user_id={user_id})", parse_mode=ParseMode.MARKDOWN)
+
+
+@router.message(Command("setadmin"))
+@require_role("owner")
+async def set_admin_handler(message: Message, command: CommandObject) -> None:
+    issuer_id = message.from_user.id if message.from_user else 0
+    args = (command.args or "").strip()
+    if not args.isdigit():
+        await message.answer("Использование: `/setadmin <user_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    target_id = int(args)
+    set_role(target_id, "admin", granted_by=issuer_id)
+    await message.answer(f"Пользователь `{target_id}` назначен админом.", parse_mode=ParseMode.MARKDOWN)
+
+
+@router.message(Command("removeadmin"))
+@require_role("owner")
+async def remove_admin_handler(message: Message, command: CommandObject) -> None:
+    args = (command.args or "").strip()
+    if not args.isdigit():
+        await message.answer(
+            "Использование: `/removeadmin <user_id>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    target_id = int(args)
+    deleted = remove_role(target_id)
+    if deleted:
+        await message.answer(f"Права администратора сняты у `{target_id}`.", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await message.answer(f"Для `{target_id}` не найдено admin-роли.", parse_mode=ParseMode.MARKDOWN)
+
+
+@router.message(Command("admins"))
+@require_role("owner")
+async def list_admins_handler(message: Message) -> None:
+    admins = list_admins()
+    if not admins:
+        await message.answer("Список администраторов пуст.")
+        return
+    lines = ["Список администраторов:"]
+    for item in admins:
+        lines.append(
+            f"- user_id={item['user_id']} role={item['role']} by={item['granted_by']} at={item['granted_at']}"
+        )
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("selftest"))
+@require_role("admin")
+async def selftest_handler(message: Message) -> None:
+    checks = [
+        f"DB users count: {count_users()}",
+        f"DB conversations count: {count_conversations()}",
+        f"LLM provider: {LLMConfig.get_provider()}",
+        f"LLM model: {LLMConfig.get_model_name()}",
+    ]
+    await message.answer("Selftest OK:\n" + "\n".join(checks))
+
+
+@router.message(Command("status"))
+@require_role("admin")
+async def status_handler(message: Message) -> None:
+    uptime = int(time.time() - PROCESS_STARTED_AT)
+    await message.answer(
+        "Status:\n"
+        f"- pid: {os.getpid()}\n"
+        f"- uptime_sec: {uptime}\n"
+        f"- users: {count_users()}\n"
+        f"- conversations: {count_conversations()}"
+    )
+
+
+@router.message(Command("restart"))
+@require_role("owner")
+async def restart_handler(message: Message) -> None:
+    await message.answer("Перезапускаюсь... 🚀")
+    os.execv(sys.executable, [sys.executable, "-m", "telegram_bot.main"])
 
 
 @router.message(lambda message: bool(message.text and not message.text.startswith("/")))

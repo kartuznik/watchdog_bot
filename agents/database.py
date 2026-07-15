@@ -65,6 +65,17 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversation_anchors_user_id ON conversation_anchors(user_id)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+                user_id TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                granted_by TEXT,
+                granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_roles_role ON roles(role)")
         conn.commit()
 
 
@@ -143,3 +154,50 @@ def list_anchors(limit: int = 100, user_id: int | None = None) -> list[dict[str,
                 (str(user_id), limit),
             ).fetchall()
     return [dict(r) for r in rows]
+
+
+def list_users(limit: int = 1000) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 5000))
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT user_id, created_at, last_seen
+            FROM users
+            ORDER BY last_seen DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_users() -> int:
+    with get_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()
+    return int(row["c"] if row else 0)
+
+
+def count_conversations() -> int:
+    with get_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM conversations").fetchone()
+    return int(row["c"] if row else 0)
+
+
+def count_user_requests() -> int:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM conversations WHERE role='user'"
+        ).fetchone()
+    return int(row["c"] if row else 0)
+
+
+def count_error_responses() -> int:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM conversations
+            WHERE role='assistant' AND content LIKE '%Произошла ошибка%'
+            """
+        ).fetchone()
+    return int(row["c"] if row else 0)

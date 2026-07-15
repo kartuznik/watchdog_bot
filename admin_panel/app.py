@@ -1,4 +1,4 @@
-"""FastAPI admin panel adapted from rag-telegram-bot/admin_panel/app.py."""
+"""Web admin panel with auth, memory controls and role management."""
 
 from __future__ import annotations
 
@@ -12,9 +12,18 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from agents.anchors import list_user_anchors
-from agents.database import clear_conversations, init_db, list_anchors, list_recent_conversations
+from agents.database import (
+    clear_conversations,
+    count_error_responses,
+    count_user_requests,
+    count_users,
+    init_db,
+    list_anchors,
+    list_recent_conversations,
+)
+from agents.roles import list_roles, normalize_role, remove_role, set_role
 
-app = FastAPI(title="AI Agents Lab Admin Panel")
+app = FastAPI(title="Watchdog Bot Admin Panel")
 security = HTTPBasic()
 started_at = time.time()
 
@@ -53,7 +62,7 @@ async def index(_: str = Depends(_authenticate)) -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI Agents Lab Admin</title>
+  <title>Watchdog Admin</title>
   <style>
     body { font-family: Arial, sans-serif; background:#111827; color:#e5e7eb; margin:0; padding:24px; }
     h1 { margin:0 0 16px 0; }
@@ -69,37 +78,64 @@ async def index(_: str = Depends(_authenticate)) -> str:
   </style>
 </head>
 <body>
-  <h1>AI Agents Lab Admin</h1>
-  <p class="muted">Статистика, память и якоря.</p>
+  <h1>Watchdog Admin Panel</h1>
+  <p class="muted">Память, роли и операционный обзор.</p>
+
   <div class="grid">
-    <div class="card"><div class="label">Диалоги</div><div id="stat-conv" class="value">-</div></div>
-    <div class="card"><div class="label">Якоря</div><div id="stat-anchors" class="value">-</div></div>
-    <div class="card"><div class="label">Аптайм</div><div id="stat-uptime" class="value">-</div></div>
+    <div class="card"><div class="label">Users</div><div id="stat-users" class="value">-</div></div>
+    <div class="card"><div class="label">Requests</div><div id="stat-requests" class="value">-</div></div>
+    <div class="card"><div class="label">Errors</div><div id="stat-errors" class="value">-</div></div>
   </div>
+  <div class="grid">
+    <div class="card"><div class="label">Dialogs</div><div id="stat-conv" class="value">-</div></div>
+    <div class="card"><div class="label">Anchors</div><div id="stat-anchors" class="value">-</div></div>
+    <div class="card"><div class="label">Uptime</div><div id="stat-uptime" class="value">-</div></div>
+  </div>
+
   <div class="card">
     <button onclick="clearMemory()">Очистить память</button>
     <div id="status" class="muted" style="margin-top:8px;"></div>
   </div>
+
   <div class="card" style="margin-top:12px;">
     <h3>Последние диалоги</h3>
     <table><thead><tr><th>ID</th><th>User</th><th>Role</th><th>Content</th><th>Created</th></tr></thead><tbody id="conversations"></tbody></table>
   </div>
+
+  <div class="card" style="margin-top:12px;">
+    <h3>Роли</h3>
+    <table><thead><tr><th>User</th><th>Role</th><th>Granted By</th><th>Granted At</th></tr></thead><tbody id="roles"></tbody></table>
+  </div>
+
   <script>
     async function refresh() {
+      const stats = await fetch('/api/stats').then(r => r.json());
       const conversations = await fetch('/api/conversations').then(r => r.json());
       const anchors = await fetch('/api/anchors').then(r => r.json());
+      const roles = await fetch('/api/roles').then(r => r.json());
       const uptime = await fetch('/api/uptime').then(r => r.json());
 
+      document.getElementById('stat-users').textContent = stats.users_count;
+      document.getElementById('stat-requests').textContent = stats.requests_count;
+      document.getElementById('stat-errors').textContent = stats.errors_count;
       document.getElementById('stat-conv').textContent = conversations.length;
       document.getElementById('stat-anchors').textContent = anchors.length;
       document.getElementById('stat-uptime').textContent = uptime.uptime;
 
-      const tbody = document.getElementById('conversations');
-      tbody.innerHTML = '';
+      const convoBody = document.getElementById('conversations');
+      convoBody.innerHTML = '';
       for (const row of conversations) {
         const tr = document.createElement('tr');
         tr.innerHTML = `<td>${row.id}</td><td>${row.user_id}</td><td>${row.role}</td><td>${String(row.content).slice(0,120)}</td><td>${row.created_at}</td>`;
-        tbody.appendChild(tr);
+        convoBody.appendChild(tr);
+      }
+
+      const rolesBody = document.getElementById('roles');
+      rolesBody.innerHTML = '';
+      for (const row of roles) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${row.user_id}</td><td>${row.role}</td><td>${row.granted_by ?? ''}</td><td>${row.granted_at ?? ''}</td>`;
+        rolesBody.appendChild(tr);
       }
     }
 
@@ -119,6 +155,15 @@ async def index(_: str = Depends(_authenticate)) -> str:
 @app.get("/api/uptime")
 async def api_uptime(_: str = Depends(_authenticate)) -> dict[str, str]:
     return {"uptime": _format_uptime(int(time.time() - started_at))}
+
+
+@app.get("/api/stats")
+async def api_stats(_: str = Depends(_authenticate)) -> dict[str, int]:
+    return {
+        "users_count": count_users(),
+        "requests_count": count_user_requests(),
+        "errors_count": count_error_responses(),
+    }
 
 
 @app.get("/api/conversations")
@@ -148,6 +193,26 @@ async def api_anchors(
     if user_id is not None:
         return list_user_anchors(user_id=user_id, limit=limit)
     return list_anchors(limit=limit, user_id=None)
+
+
+@app.get("/api/roles")
+async def api_roles(_: str = Depends(_authenticate)) -> list[dict]:
+    return list_roles()
+
+
+@app.post("/api/set_role")
+async def api_set_role(
+    _: str = Depends(_authenticate),
+    user_id: int = Query(...),
+    role: str = Query(...),
+    granted_by: int = Query(default=0),
+) -> dict[str, str]:
+    normalized = normalize_role(role)
+    if normalized == "user":
+        remove_role(user_id)
+        return {"status": "ok", "message": f"Role removed for {user_id}; now user"}
+    set_role(user_id, normalized, granted_by=granted_by)
+    return {"status": "ok", "message": f"Role {normalized} set for {user_id}"}
 
 
 if __name__ == "__main__":
