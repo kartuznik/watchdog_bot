@@ -122,6 +122,16 @@ async def research_command_handler(message: Message, command: CommandObject) -> 
     await _run_research_flow(message, topic)
 
 
+@router.message(Command("clear"))
+async def clear_history_handler(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    deleted = chat_memory.clear_user_memory(user_id)
+    await message.answer(
+        f"История очищена. Удалено сообщений: {deleted}.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
 @router.message(lambda message: bool(message.text and not message.text.startswith("/")))
 async def plain_text_handler(message: Message) -> None:
     await _run_research_flow(message, message.text or "")
