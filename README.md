@@ -20,6 +20,12 @@ python -m telegram_bot.main
 
 Минимум в `.env`: `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, `ADMIN_PASSWORD`.
 
+Для Docker Compose используй только эти внешние порты:
+- Bot metrics: `8011` (не `8001`)
+- Admin panel: `8004` (не `8003`)
+- Prometheus: `9091` (не `9090`)
+- Grafana: `3001` (не `3000`)
+
 ---
 
 ## Features
@@ -211,7 +217,3 @@ WantedBy=multi-user.target
 3. Добавь/обнови тесты в `tests/`.
 4. Обнови таблицу команд в README.
 5. Сделай локальный smoke (`pytest` + запуск бота) перед push.
-
----
-
-Если хочешь следующий уровень, мы можем вынести graph-execution в очередь worker-ов и сделать SLA-наблюдаемость по пользователям/ролям/ошибкам в реальном времени.
