@@ -76,6 +76,24 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_roles_role ON roles(role)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS async_tasks (
+                task_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                payload TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'queued',
+                result TEXT DEFAULT '',
+                error TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_async_tasks_user_id ON async_tasks(user_id)"
+        )
         conn.commit()
 
 
@@ -201,3 +219,54 @@ def count_error_responses() -> int:
             """
         ).fetchone()
     return int(row["c"] if row else 0)
+
+
+def create_async_task(
+    *,
+    task_id: str,
+    user_id: int,
+    task_type: str,
+    payload: str,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO async_tasks (task_id, user_id, task_type, payload, status, updated_at)
+            VALUES (?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP)
+            """,
+            (task_id, str(user_id), task_type.strip(), payload.strip()),
+        )
+        conn.commit()
+
+
+def update_async_task_status(
+    task_id: str,
+    *,
+    status: str,
+    result: str = "",
+    error: str = "",
+) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            UPDATE async_tasks
+            SET status=?, result=?, error=?, updated_at=CURRENT_TIMESTAMP
+            WHERE task_id=?
+            """,
+            (status.strip(), result, error, task_id.strip()),
+        )
+        conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def get_async_task(task_id: str) -> dict[str, Any] | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT task_id, user_id, task_type, payload, status, result, error, created_at, updated_at
+            FROM async_tasks
+            WHERE task_id=?
+            """,
+            (task_id.strip(),),
+        ).fetchone()
+    return dict(row) if row else None

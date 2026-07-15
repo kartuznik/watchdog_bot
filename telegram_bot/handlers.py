@@ -7,7 +7,9 @@ import logging
 import os
 import sys
 import time
+import uuid
 from contextlib import suppress
+from urllib.parse import urlparse
 from typing import cast
 
 from aiogram import Router
@@ -15,7 +17,19 @@ from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 
-from agents.database import count_conversations, count_users
+try:
+    from arq.connections import RedisSettings, create_pool
+except Exception:  # pragma: no cover - optional in local dry-runs without deps installed.
+    RedisSettings = None
+    create_pool = None
+
+from agents.database import (
+    count_conversations,
+    count_users,
+    create_async_task,
+    get_async_task,
+    update_async_task_status,
+)
 from agents.health_check import HealthCheckService
 from agents.llm_config import LLMConfig
 from agents.monitor_agent import MonitorAgentState, run_monitor_agent
@@ -68,6 +82,88 @@ def _format_result_markdown(result: MultiAgentState) -> str:
     )
 
 
+def _redis_settings_from_env() -> RedisSettings | None:
+    if RedisSettings is None:
+        return None
+    raw = os.getenv("REDIS_URL", "redis://redis:6379").strip()
+    parsed = urlparse(raw)
+    host = parsed.hostname or "redis"
+    port = int(parsed.port or 6379)
+    database = int((parsed.path or "/0").strip("/")) if (parsed.path or "").strip("/") else 0
+    password = parsed.password
+    return RedisSettings(host=host, port=port, database=database, password=password)
+
+
+def _is_heavy_request(topic: str) -> bool:
+    normalized = topic.strip().lower()
+    if len(normalized) > 130:
+        return True
+    heavy_markers = (
+        "исследуй",
+        "сравни",
+        "подробно",
+        "нейросет",
+        "проанализируй",
+        "тенденц",
+        "рынок",
+    )
+    return any(marker in normalized for marker in heavy_markers)
+
+
+async def _enqueue_research_task(topic: str, user_id: int) -> str | None:
+    if create_pool is None:
+        return None
+    redis_settings = _redis_settings_from_env()
+    if redis_settings is None:
+        return None
+
+    task_id = str(uuid.uuid4())
+    create_async_task(
+        task_id=task_id,
+        user_id=user_id,
+        task_type="research",
+        payload=topic,
+    )
+    redis = await create_pool(redis_settings)
+    try:
+        await redis.enqueue_job("process_research_task", topic, user_id, task_id, _job_id=task_id)
+    except Exception as exc:
+        update_async_task_status(task_id, status="failed", error=str(exc))
+        raise
+    finally:
+        await redis.close()
+    return task_id
+
+
+async def _poll_task_and_send_result(
+    message: Message,
+    task_id: str,
+    *,
+    topic: str,
+    user_id: int,
+) -> None:
+    max_attempts = 180  # ~15 minutes with 5-second interval.
+    for _ in range(max_attempts):
+        task = get_async_task(task_id)
+        if not task:
+            await asyncio.sleep(5)
+            continue
+        status = str(task.get("status", "queued")).strip().lower()
+        if status == "done":
+            result = str(task.get("result", "")).strip() or "Пустой ответ от worker."
+            chat_memory.save_user_memory(user_id, topic, result)
+            await message.answer(f"✅ Фоновая задача завершена:\n\n{result}")
+            return
+        if status == "failed":
+            error = str(task.get("error", "")).strip() or "неизвестная ошибка"
+            await message.answer(f"❌ Фоновая задача завершилась ошибкой: {error}")
+            return
+        await asyncio.sleep(5)
+    await message.answer(
+        "⏱ Фоновая задача всё ещё выполняется. Проверь позже командой `/status` или повтори запрос."
+    )
+
+
 async def _run_research_flow(message: Message, topic: str) -> None:
     if not topic.strip():
         await message.answer(
@@ -77,6 +173,27 @@ async def _run_research_flow(message: Message, topic: str) -> None:
         return
 
     user_id = message.from_user.id if message.from_user else 0
+    if _is_heavy_request(topic):
+        try:
+            task_id = await _enqueue_research_task(topic.strip(), user_id)
+        except Exception:
+            task_id = None
+            logger.exception("Failed to enqueue heavy research task")
+        if task_id:
+            await message.answer(
+                f"Задача принята, обрабатываю ⏳\nID: `{task_id}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            asyncio.create_task(
+                _poll_task_and_send_result(
+                    message,
+                    task_id,
+                    topic=topic.strip(),
+                    user_id=user_id,
+                )
+            )
+            return
+
     conversation_history = chat_memory.get_user_memory(user_id)
     initial_state = build_initial_multi_agent_state(
         topic=topic.strip(),

@@ -7,5 +7,6 @@ tavily-python
 fastapi
 uvicorn
 prometheus-client
+arq>=0.25.0
 pytest
 pytest-asyncio

@@ -15,6 +15,23 @@ services:
       - "8011:8001"
     depends_on:
       - redis
+      - worker
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["arq", "worker.WorkerSettings"]
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: "redis://redis:6379"
+      AGENT_DB_PATH: "/app/data/agent_memory.db"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
     restart: unless-stopped
 
   admin-panel:
