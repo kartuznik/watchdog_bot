@@ -30,6 +30,8 @@ python -m telegram_bot.main
 - 🧾 **Память диалога:** SQLite history, контекст между сообщениями
 - 🔖 **Якоря:** быстрые закладки ключевых кусочков диалога
 - 🛡 **Модульная архитектура:** feature flags в `config.py` (`ENABLED_MODULES`)
+- ♻️ **Self-healing:** lightweight watchdog + monitor-agent диагностика
+- 🧵 **Background worker:** ARQ + Redis для тяжелых задач без блокировки бота
 - 📊 **Наблюдаемость:** Prometheus метрики + Grafana dashboards
 - 🛠 **Операционка:** FastAPI web-admin панель для памяти и ролей
 
@@ -55,6 +57,7 @@ Telegram User
              |
              +--> LLM provider (OpenAI / DeepSeek via LLMConfig)
              +--> Conversation memory + anchors (SQLite)
+             +--> Heavy tasks queue (ARQ + Redis worker)
              +--> Metrics endpoint (:8001)
                        |
                        v
@@ -79,6 +82,7 @@ Telegram User
 | `/clear` | Очистка истории текущего пользователя | `user` |
 | `/me` | Показать текущую роль | `user` |
 | `/selftest` | Проверка состояния ключевых подсистем | `admin` |
+| `/fulldiag` | Полная диагностика через monitor-agent | `admin` |
 | `/status` | Технический статус и health summary | `admin/owner` |
 | `/restart` | Контролируемый перезапуск процесса | `owner` |
 | `/setadmin <id>` | Назначить администратора | `owner` |
@@ -145,6 +149,14 @@ docker compose ps
 - `prometheus`
 - `grafana`
 
+Проверка после старта:
+
+```bash
+docker compose ps
+docker compose logs bot
+docker compose logs worker
+```
+
 ### systemd (для VPS)
 
 ```ini
@@ -168,6 +180,7 @@ WantedBy=multi-user.target
 ## Monitoring
 
 - `/selftest` — функциональная проверка подсистем;
+- `/fulldiag` — расширенная диагностика (LangGraph monitor-agent);
 - `/status` — технический статус (role-protected);
 - Prometheus собирает runtime-метрики;
 - Grafana отображает latency/error/token dashboards;
@@ -185,6 +198,7 @@ WantedBy=multi-user.target
 | Пустой веб-поиск | нет `TAVILY_API_KEY` | добавь ключ в `.env` |
 | `401` на админке | неверный Basic Auth | используй `admin` + `ADMIN_PASSWORD` |
 | Нет метрик в Grafana | Prometheus не скрапит bot | проверь `monitoring/prometheus/prometheus.yml` и порты |
+| `TelegramConflictError` | второй процесс использует тот же bot token | останови лишний polling-инстанс |
 
 ---
 

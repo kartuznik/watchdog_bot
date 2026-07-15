@@ -1,5 +1,5 @@
 services:
-  bot:
+  bot: # Telegram bot
     build:
       context: .
       dockerfile: Dockerfile
@@ -18,7 +18,7 @@ services:
       - worker
     restart: unless-stopped
 
-  worker:
+  worker: # Background worker
     build:
       context: .
       dockerfile: Dockerfile
@@ -34,7 +34,7 @@ services:
       - redis
     restart: unless-stopped
 
-  admin-panel:
+  admin-panel: # Web admin (port 8004)
     build:
       context: .
       dockerfile: Dockerfile
@@ -52,7 +52,7 @@ services:
       - bot
     restart: unless-stopped
 
-  redis:
+  redis: # Queue + cache
     image: redis:7-alpine
     volumes:
       - redis_data:/data
