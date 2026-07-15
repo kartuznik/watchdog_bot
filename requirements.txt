@@ -1,0 +1,11 @@
+langgraph
+langchain-openai
+langchain-core
+python-dotenv
+aiogram>=3.0.0
+tavily-python
+fastapi
+uvicorn
+prometheus-client
+pytest
+pytest-asyncio

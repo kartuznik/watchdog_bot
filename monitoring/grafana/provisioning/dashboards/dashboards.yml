@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: "AI Agents Lab Monitoring"
+    orgId: 1
+    folder: "AI Agents Lab"
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

@@ -1,0 +1,75 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "telegram_bot.main"]
+    env_file:
+      - .env
+    environment:
+      METRICS_PORT: "8001"
+      REDIS_URL: "redis://redis:6379"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8011:8001"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  admin-panel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "admin_panel.app"]
+    env_file:
+      - .env
+    environment:
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-change-me}"
+      AGENT_DB_PATH: "/app/data/agent_memory.db"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8004:8004"
+    depends_on:
+      - bot
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9091:9090"
+    depends_on:
+      - bot
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    user: "0:0"
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin123}"
+      GF_DEFAULT_APP_TIMEZONE: "Europe/Helsinki"
+      TZ: "Europe/Helsinki"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  grafana_data:
