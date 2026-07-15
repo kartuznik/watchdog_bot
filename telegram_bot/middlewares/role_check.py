@@ -16,6 +16,7 @@ COMMAND_ROLE_REQUIREMENTS: dict[str, RoleName] = {
     "/admins": "owner",
     "/restart": "owner",
     "/selftest": "admin",
+    "/fulldiag": "admin",
     "/status": "admin",
 }
 

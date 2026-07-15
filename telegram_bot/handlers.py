@@ -16,7 +16,9 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 
 from agents.database import count_conversations, count_users
+from agents.health_check import HealthCheckService
 from agents.llm_config import LLMConfig
+from agents.monitor_agent import MonitorAgentState, run_monitor_agent
 from agents.multi_agent import (
     MultiAgentState,
     build_initial_multi_agent_state,
@@ -37,6 +39,18 @@ router = Router()
 multi_agent_graph = build_multi_agent_graph()
 chat_memory = ChatMemory(max_messages=20)
 PROCESS_STARTED_AT = time.time()
+runtime_health_checker: HealthCheckService | None = None
+runtime_last_monitor_state: MonitorAgentState | None = None
+
+
+def configure_runtime_services(*, health_checker: HealthCheckService | None) -> None:
+    global runtime_health_checker
+    runtime_health_checker = health_checker
+
+
+def set_last_monitor_state(state: MonitorAgentState) -> None:
+    global runtime_last_monitor_state
+    runtime_last_monitor_state = state
 
 
 def _format_result_markdown(result: MultiAgentState) -> str:
@@ -195,6 +209,18 @@ async def list_admins_handler(message: Message) -> None:
 @router.message(Command("selftest"))
 @require_role("admin")
 async def selftest_handler(message: Message) -> None:
+    if runtime_health_checker is not None:
+        snapshot = await runtime_health_checker.run_once(allow_restart=False)
+        await message.answer(
+            "Selftest OK:\n"
+            f"- db_ok: {snapshot.db_ok}\n"
+            f"- telegram_ok: {snapshot.telegram_ok}\n"
+            f"- memory_usage: {snapshot.memory_usage:.2f}%\n"
+            f"- consecutive_telegram_failures: {snapshot.consecutive_telegram_failures}\n"
+            f"- message: {snapshot.message}"
+        )
+        return
+
     checks = [
         f"DB users count: {count_users()}",
         f"DB conversations count: {count_conversations()}",
@@ -208,12 +234,37 @@ async def selftest_handler(message: Message) -> None:
 @require_role("admin")
 async def status_handler(message: Message) -> None:
     uptime = int(time.time() - PROCESS_STARTED_AT)
+    health = runtime_health_checker.last_snapshot if runtime_health_checker else None
+    monitor = runtime_last_monitor_state
     await message.answer(
         "Status:\n"
         f"- pid: {os.getpid()}\n"
         f"- uptime_sec: {uptime}\n"
         f"- users: {count_users()}\n"
-        f"- conversations: {count_conversations()}"
+        f"- conversations: {count_conversations()}\n"
+        f"- health_message: {health.message if health else 'n/a'}\n"
+        f"- monitor_decision: {monitor['decision'] if monitor else 'n/a'}"
+    )
+
+
+@router.message(Command("fulldiag"))
+@require_role("admin")
+async def fulldiag_handler(message: Message) -> None:
+    global runtime_last_monitor_state
+    if runtime_health_checker is None:
+        await message.answer("Self-diagnostics service is not initialized.")
+        return
+    snapshot = await runtime_health_checker.run_once(allow_restart=False)
+    runtime_last_monitor_state = await run_monitor_agent(
+        bot=message.bot,
+        admin_user_id=runtime_health_checker.admin_user_id,
+        health_snapshot=snapshot,
+    )
+    await message.answer(
+        "Full diagnostics completed:\n"
+        f"- decision: {runtime_last_monitor_state['decision']}\n"
+        f"- analysis: {runtime_last_monitor_state['analysis']}\n"
+        f"- alert_text: {runtime_last_monitor_state['alert_text']}"
     )
 
 
