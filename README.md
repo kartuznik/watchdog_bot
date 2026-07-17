@@ -1,5 +1,11 @@
 # Watchdog — AI Multi-Agent Assistant
 
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)]()
+[![LangGraph](https://img.shields.io/badge/langgraph-latest-green.svg)]()
+[![aiogram 3.x](https://img.shields.io/badge/aiogram-3.x-green.svg)]()
+[![Docker ready](https://img.shields.io/badge/docker-ready-blue.svg)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)]()
+
 Автономный Telegram-ассистент, который **думает, прежде чем ответить**.
 
 В отличие от обычных чат-ботов, Watchdog использует **multi-agent архитектуру** на базе LangGraph: перед ответом запускается цепочка Researcher → Writer → Reviewer, где каждый агент выполняет свою роль.
