@@ -42,12 +42,25 @@ agent_llm_fallback_total = Counter(
     ["from_provider", "to_provider"],
 )
 
+agent_router_decisions_total = Counter(
+    "agent_router_decisions_total",
+    "Router decisions for web search usage.",
+    ["decision"],
+)
+
 
 def observe_llm_fallback(from_provider: str, to_provider: str) -> None:
     agent_llm_fallback_total.labels(
         from_provider=from_provider.strip().lower() or "unknown",
         to_provider=to_provider.strip().lower() or "unknown",
     ).inc()
+
+
+def observe_router_decision(decision: str) -> None:
+    label = decision.strip().lower()
+    if label not in {"search", "no_search"}:
+        label = "no_search" if label in {"skip", "false", "0"} else "search"
+    agent_router_decisions_total.labels(decision=label).inc()
 
 
 def observe_token_usage(

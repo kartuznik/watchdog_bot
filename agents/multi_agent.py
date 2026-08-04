@@ -12,7 +12,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 
 from agents.llm_config import LLMConfig
-from agents.metrics import observe_llm_fallback
+from agents.metrics import observe_llm_fallback, observe_router_decision
+from agents.router import merge_router_decision
 from agents.tg_parser import extract_telegram_usernames, fetch_many_channels_async
 from agents.web_search import SourceItem, WebSearchTool, normalize_source_items
 from config import is_module_enabled
@@ -20,6 +21,7 @@ from config import is_module_enabled
 logger = logging.getLogger(__name__)
 
 RouteLabel = Literal["writer_node", "__end__"]
+RouterNext = Literal["web_search_node", "research_node", "writer_node"]
 MAX_REVISIONS = 2
 APPROVE_SCORE_THRESHOLD = 3.5
 RESEARCH_SUMMARY_BUDGET = 800
@@ -46,6 +48,9 @@ class MultiAgentState(TypedDict):
     llm_prompt_tokens: int
     llm_completion_tokens: int
     estimated_cost_usd: float
+    need_web_search: bool
+    router_mode: str
+    router_reason: str
 
 
 def _extract_usage(message: Any) -> tuple[int, int]:
@@ -265,12 +270,58 @@ def _mock_review(state: MultiAgentState) -> dict[str, str | int]:
     return {"feedback": ""}
 
 
+async def router_node(state: MultiAgentState) -> dict[str, Any]:
+    """Classify whether the query needs live web search."""
+    web_enabled = is_module_enabled("web_search")
+    llm_raw: str | None = None
+    token_update: dict[str, int | float] = {}
+    if state["use_llm"]:
+        result = await _invoke_llm(
+            system_prompt=(
+                "Ты Router-агент. Реши, нужен ли живой веб-поиск. "
+                "Ответь только JSON: "
+                '{"need_web_search": true|false, "mode": "creative"|"factual"|"research", "reason": "..."}. '
+                "creative: стихи, шутки, перевод, ролевая игра — поиск не нужен. "
+                "factual: определение/объяснение из общих знаний — поиск обычно не нужен. "
+                "research: факты, новости, актуальность, сравнения — нужен поиск."
+            ),
+            user_prompt=f"Запрос пользователя:\n{state['topic']}",
+            temperature=0,
+        )
+        if result is not None:
+            llm_raw, prompt_tokens, completion_tokens = result
+            token_update = _token_cost_update(state, prompt_tokens, completion_tokens)
+
+    decision = merge_router_decision(
+        topic=state["topic"],
+        llm_raw=llm_raw,
+        web_search_enabled=web_enabled,
+    )
+    observe_router_decision(str(decision["router_decision"]))
+    return {
+        "need_web_search": bool(decision["need_web_search"]),
+        "router_mode": str(decision["router_mode"]),
+        "router_reason": str(decision["router_reason"]),
+        **token_update,
+    }
+
+
+def route_after_router(state: MultiAgentState) -> RouterNext:
+    if state.get("need_web_search"):
+        return "web_search_node"
+    mode = str(state.get("router_mode") or "").strip().lower()
+    if mode == "creative":
+        return "writer_node"
+    return "research_node"
+
+
 async def web_search_node(state: MultiAgentState) -> dict[str, Any]:
     topic = state["topic"]
-    if not state["use_llm"] or not is_module_enabled("web_search"):
+    if not state["use_llm"] or not is_module_enabled("web_search") or not state.get("need_web_search", True):
         return {
-            "research_data": "Веб-поиск отключен (feature flag / mock mode).",
-            "web_sources": [],
+            "research_data": state.get("research_data")
+            or "Веб-поиск пропущен роутером или отключён.",
+            "web_sources": list(state.get("web_sources") or []),
         }
 
     tavily_text = ""
@@ -392,9 +443,12 @@ async def writer_node(state: MultiAgentState) -> dict[str, str | int | float]:
         if source_lines
         else "Список подтвержденных источников отсутствует."
     )
+    research_block = state["research_data"].strip() or state.get("research_summary", "")
+    if str(state.get("router_mode") or "") == "creative" and not research_block:
+        research_block = "Креативный запрос: опирайся на формулировку темы, без псевдофактов."
     user_prompt = (
         f"Тема: {state['topic']}\n\n"
-        f"Исследование:\n{state['research_data']}\n\n"
+        f"Исследование:\n{research_block}\n\n"
         f"{sources_context}\n\n"
         f"Обратная связь ревьюера: {feedback}\n\n"
         "Напиши финальный ответ в 3-5 коротких абзацах. "
@@ -536,16 +590,26 @@ def route_after_review(state: MultiAgentState) -> RouteLabel:
 
 
 def build_multi_agent_graph():
-    """Build WebSearch -> Researcher -> Summary -> Writer -> Reviewer graph."""
+    """Build Router -> (WebSearch?) -> Researcher? -> Summary? -> Writer -> Reviewer graph."""
     graph = StateGraph(MultiAgentState)
 
+    graph.add_node("router_node", router_node)
     graph.add_node("web_search_node", web_search_node)
     graph.add_node("research_node", research_node)
     graph.add_node("research_summary_node", research_summary_node)
     graph.add_node("writer_node", writer_node)
     graph.add_node("reviewer_node", reviewer_node)
 
-    graph.add_edge(START, "web_search_node")
+    graph.add_edge(START, "router_node")
+    graph.add_conditional_edges(
+        "router_node",
+        route_after_router,
+        {
+            "web_search_node": "web_search_node",
+            "research_node": "research_node",
+            "writer_node": "writer_node",
+        },
+    )
     graph.add_edge("web_search_node", "research_node")
     graph.add_edge("research_node", "research_summary_node")
     graph.add_edge("research_summary_node", "writer_node")
@@ -580,6 +644,9 @@ def build_initial_multi_agent_state(
         "llm_prompt_tokens": 0,
         "llm_completion_tokens": 0,
         "estimated_cost_usd": 0.0,
+        "need_web_search": False,
+        "router_mode": "factual",
+        "router_reason": "",
     }
 
 

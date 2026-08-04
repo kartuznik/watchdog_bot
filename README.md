@@ -29,9 +29,11 @@ docker compose up -d --build
 
 ## Возможности
 
-- **Multi-agent reasoning**: Web Search → Researcher → Summary → Writer → Reviewer (structured JSON scores).
-- **Product Telegram UX**: HTML-ответы без сырых `#`-заголовков; порядок Draft → Research summary → Sources.
-- **Tavily web search**: источники как нумерованный список + inline-кнопки (title → url).
+- **Smart Router**: лёгкий классификатор решает, нужен ли Tavily (экономия токенов на стихах/терминах).
+- **Progress UX**: одно сервисное сообщение со стадиями («Ищу источники…» → «Формирую ответ…»), затем удаляется.
+- **Multi-agent reasoning**: Router → (Web Search?) → Researcher → Summary → Writer → Reviewer.
+- **Product Telegram UX**: HTML-ответы; порядок Draft → Research summary → Sources (кликабельные якоря + кнопки).
+- **Tavily web search**: только когда router выбрал search; иначе внутренние знания / Writer.
 - **LLM cost control**: `LLM_PROVIDER=openai|deepseek`, оценка токенов/стоимости в Prometheus (футер только admin/owner).
 - **Conversation memory**: SQLite с `WAL` + `busy_timeout` для параллельной записи bot/worker/admin.
 - **Background worker**: тяжёлые запросы уходят в ARQ вместе с `conversation_history`.
@@ -43,18 +45,18 @@ docker compose up -d --build
 ```mermaid
 flowchart LR
     U[Telegram User] --> A[aiogram handlers]
+    A --> PGS[Progress message]
     A --> G[LangGraph Pipeline]
-    G --> W[Web Search Node<br/>Tavily + TG parser]
-    W --> R[Researcher Node]
-    R --> S[Research Summary<br/>3-5 bullets ≤800]
-    S --> WR[Writer Node]
-    WR --> RV[Reviewer Node<br/>JSON scores]
+    G --> RT[Router Node]
+    RT -->|search| W[Web Search Node]
+    RT -->|factual| R[Researcher Node]
+    RT -->|creative| WR[Writer Node]
+    W --> R
+    R --> S[Research Summary]
+    S --> WR
+    WR --> RV[Reviewer Node]
     RV -->|revise| WR
-    RV -->|approve| OUT[HTML UX<br/>Draft → Summary → Sources]
-    R --> LLM[LLM Provider<br/>OpenAI/DeepSeek]
-    S --> LLM
-    WR --> LLM
-    RV --> LLM
+    RV -->|approve| OUT[HTML UX]
     A --> DB[(SQLite WAL Memory)]
     A --> Q[(ARQ + Redis)]
     A --> M[Metrics :8001]
@@ -62,6 +64,32 @@ flowchart LR
     P --> GF[Grafana :3001]
     A --> ADM[Web Admin Panel :8004]
 ```
+
+## Smart Router и экономия токенов
+
+Перед тяжёлым пайплайном `router_node` классифицирует запрос (LLM JSON + heuristic fallback):
+
+| Решение | Когда | Путь |
+|---|---|---|
+| `no_search` + creative | стих, шутка, перевод | сразу Writer → Reviewer |
+| `no_search` + factual | «что такое…», объясни термин | Research → Summary → Writer (без Tavily) |
+| `search` | новости, актуальность, сравнения | Web Search → Research → … |
+
+Метрика: `agent_router_decisions_total{decision="search"|"no_search"}`.
+
+## Progress indicators (живой UX)
+
+Пока граф работает 10–30 секунд, бот обновляет **одно** сервисное сообщение:
+
+1. 🧭 Определяю маршрут…
+2. 🔎 Ищу источники… *(только если router выбрал search)*
+3. 🧠 Анализирую данные…
+4. ✍️ Формирую ответ…
+5. 🧪 Проверяю качество…
+
+Синхронный путь: `graph.astream(..., stream_mode="updates")`.  
+Фоновый ARQ: колонка `async_tasks.stage` + `progress_message_id`, poller редактирует то же сообщение.  
+Повторный `edit` при том же stage не отправляется; ошибки Telegram при delete/edit не роняют бота. После финала progress-сообщение удаляется.
 
 ## Продуктовый формат ответов
 
@@ -172,6 +200,7 @@ python -m telegram_bot.main
 - `agent_completion_tokens_total`
 - `agent_estimated_cost_usd_total`
 - `agent_llm_fallback_total{from_provider,to_provider}`
+- `agent_router_decisions_total{decision="search"|"no_search"}`
 
 ### Операционные заметки
 

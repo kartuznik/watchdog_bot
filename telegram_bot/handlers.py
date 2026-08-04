@@ -55,6 +55,7 @@ from telegram_bot.messaging import (
     shorten_for_memory,
 )
 from telegram_bot.middlewares.role_check import require_role
+from telegram_bot.progress import ProgressReporter, stage_for_node
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -157,6 +158,9 @@ async def _enqueue_research_task(
     topic: str,
     user_id: int,
     conversation_history: list[dict[str, str]] | None = None,
+    *,
+    chat_id: int | str = "",
+    progress_message_id: int = 0,
 ) -> str | None:
     if create_pool is None:
         return None
@@ -171,6 +175,9 @@ async def _enqueue_research_task(
         user_id=user_id,
         task_type="research",
         payload=topic,
+        chat_id=chat_id,
+        progress_message_id=progress_message_id,
+        stage="queued",
     )
     redis = await create_pool(redis_settings)
     try:
@@ -183,7 +190,7 @@ async def _enqueue_research_task(
             _job_id=task_id,
         )
     except Exception as exc:
-        update_async_task_status(task_id, status="failed", error=str(exc))
+        update_async_task_status(task_id, status="failed", error=str(exc), stage="done")
         raise
     finally:
         await redis.close()
@@ -196,15 +203,23 @@ async def _poll_task_and_send_result(
     *,
     topic: str,
     user_id: int,
+    progress: ProgressReporter | None = None,
 ) -> None:
     max_attempts = 180  # ~15 minutes with 5-second interval.
+    last_stage = ""
     for _ in range(max_attempts):
         task = get_async_task(task_id)
         if not task:
             await asyncio.sleep(5)
             continue
         status = str(task.get("status", "queued")).strip().lower()
+        stage = str(task.get("stage", "") or "").strip().lower()
+        if progress is not None and stage and stage != last_stage and status not in {"done", "failed"}:
+            await progress.set_stage(stage)
+            last_stage = stage
         if status == "done":
+            if progress is not None:
+                await progress.finish(mode="delete")
             raw = str(task.get("result", "")).strip() or "Пустой ответ от worker."
             role = get_role(user_id)
             try:
@@ -231,15 +246,43 @@ async def _poll_task_and_send_result(
             await _answer_chunks(message, parts, parse_mode=None)
             return
         if status == "failed":
+            if progress is not None:
+                await progress.finish(mode="delete")
             error = str(task.get("error", "")).strip() or "неизвестная ошибка"
-            # Keep worker errors honest but avoid leaking raw secrets/keys.
             safe = format_user_facing_error(RuntimeError(error))
             await message.answer(f"❌ Фоновая задача завершилась ошибкой.\n{safe}")
             return
         await asyncio.sleep(5)
+    if progress is not None:
+        await progress.finish(mode="header")
     await message.answer(
-        "⏱ Фоновая задача всё ещё выполняется. Проверь позже командой `/status` или повтори запрос."
+        "⏱ Фоновая задача всё ещё выполняется. Проверь позже командой /status или повтори запрос."
     )
+
+
+async def _run_graph_with_progress(
+    initial_state: MultiAgentState,
+    progress: ProgressReporter,
+) -> MultiAgentState:
+    """Stream graph updates and refresh a single Telegram progress message."""
+    merged: dict = dict(initial_state)
+    await progress.set_stage("routing")
+    async for event in multi_agent_graph.astream(initial_state, stream_mode="updates"):
+        if not isinstance(event, dict):
+            continue
+        for node_name, delta in event.items():
+            if isinstance(delta, dict):
+                merged.update(delta)
+            stage = stage_for_node(str(node_name))
+            if stage:
+                await progress.set_stage(stage)
+        # Keep typing indicator alive alongside staged edits.
+        with suppress(Exception):
+            await progress.bot.send_chat_action(
+                chat_id=progress.chat_id,
+                action=ChatAction.TYPING,
+            )
+    return cast(MultiAgentState, merged)
 
 
 async def _run_research_flow(message: Message, topic: str) -> None:
@@ -253,28 +296,30 @@ async def _run_research_flow(message: Message, topic: str) -> None:
 
     user_id = message.from_user.id if message.from_user else 0
     conversation_history = chat_memory.get_user_memory(user_id)
+    progress = ProgressReporter(message.bot, message.chat.id)
 
     if is_module_enabled("background_worker") and _is_heavy_request(topic):
+        await progress.start("queued")
         try:
             task_id = await _enqueue_research_task(
                 topic.strip(),
                 user_id,
                 conversation_history,
+                chat_id=message.chat.id,
+                progress_message_id=int(progress.message_id or 0),
             )
         except Exception:
             task_id = None
             logger.exception("Failed to enqueue heavy research task")
+            await progress.finish(mode="delete")
         if task_id:
-            await message.answer(
-                f"Задача принята, обрабатываю ⏳\nID: <code>{task_id}</code>",
-                parse_mode=ParseMode.HTML,
-            )
             asyncio.create_task(
                 _poll_task_and_send_result(
                     message,
                     task_id,
                     topic=topic.strip(),
                     user_id=user_id,
+                    progress=progress,
                 )
             )
             return
@@ -286,14 +331,11 @@ async def _run_research_flow(message: Message, topic: str) -> None:
         use_llm=True,
     )
 
-    typing_task = asyncio.create_task(_typing_pulse(message))
+    await progress.start("routing")
     started_at = time.perf_counter()
 
     try:
-        result = cast(
-            MultiAgentState,
-            await multi_agent_graph.ainvoke(initial_state),
-        )
+        result = await _run_graph_with_progress(initial_state, progress)
         elapsed = time.perf_counter() - started_at
         agent_requests_total.inc()
         agent_request_duration_seconds.observe(elapsed)
@@ -313,26 +355,20 @@ async def _run_research_flow(message: Message, topic: str) -> None:
             topic.strip(),
             shorten_for_memory([m.text for m in outgoing]),
         )
+        await progress.finish(mode="delete")
         await _answer_chunks(message, outgoing)
     except Exception as exc:
         elapsed = time.perf_counter() - started_at
         agent_requests_failed_total.inc()
         agent_request_duration_seconds.observe(elapsed)
         logger.exception("Multi-agent graph execution failed for user_id=%s", user_id)
+        await progress.finish(mode="delete")
         await message.answer(format_user_facing_error(exc))
     finally:
-        typing_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await typing_task
-
-
-async def _typing_pulse(message: Message) -> None:
-    """Send typing action periodically while long graph run is in progress."""
-    chat_id = message.chat.id
-    bot = message.bot
-    while True:
-        await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        await asyncio.sleep(4)
+        # Ensure progress message is cleaned up even if finish already ran.
+        with suppress(Exception):
+            if progress.message_id is not None:
+                await progress.finish(mode="delete")
 
 
 @router.message(CommandStart())

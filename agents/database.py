@@ -90,6 +90,9 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'queued',
                 result TEXT DEFAULT '',
                 error TEXT DEFAULT '',
+                stage TEXT DEFAULT '',
+                chat_id TEXT DEFAULT '',
+                progress_message_id INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -98,7 +101,17 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_async_tasks_user_id ON async_tasks(user_id)"
         )
+        _ensure_column(conn, "async_tasks", "stage", "TEXT DEFAULT ''")
+        _ensure_column(conn, "async_tasks", "chat_id", "TEXT DEFAULT ''")
+        _ensure_column(conn, "async_tasks", "progress_message_id", "INTEGER DEFAULT 0")
         conn.commit()
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    existing = {str(row[1]) for row in rows}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def ensure_user(user_id: int) -> None:
@@ -231,14 +244,27 @@ def create_async_task(
     user_id: int,
     task_type: str,
     payload: str,
+    chat_id: int | str = "",
+    progress_message_id: int = 0,
+    stage: str = "queued",
 ) -> None:
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO async_tasks (task_id, user_id, task_type, payload, status, updated_at)
-            VALUES (?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP)
+            INSERT INTO async_tasks (
+                task_id, user_id, task_type, payload, status, stage, chat_id, progress_message_id, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, CURRENT_TIMESTAMP)
             """,
-            (task_id, str(user_id), task_type.strip(), payload.strip()),
+            (
+                task_id,
+                str(user_id),
+                task_type.strip(),
+                payload.strip(),
+                stage.strip(),
+                str(chat_id),
+                int(progress_message_id or 0),
+            ),
         )
         conn.commit()
 
@@ -249,15 +275,42 @@ def update_async_task_status(
     status: str,
     result: str = "",
     error: str = "",
+    stage: str | None = None,
 ) -> int:
+    with get_connection() as conn:
+        if stage is None:
+            cur = conn.execute(
+                """
+                UPDATE async_tasks
+                SET status=?, result=?, error=?, updated_at=CURRENT_TIMESTAMP
+                WHERE task_id=?
+                """,
+                (status.strip(), result, error, task_id.strip()),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE async_tasks
+                SET status=?, result=?, error=?, stage=?, updated_at=CURRENT_TIMESTAMP
+                WHERE task_id=?
+                """,
+                (status.strip(), result, error, stage.strip(), task_id.strip()),
+            )
+        conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def update_async_task_stage(task_id: str, stage: str) -> int:
+    """Update stage only when it actually changes (reduces poller/edit spam)."""
+    clean_stage = stage.strip()
     with get_connection() as conn:
         cur = conn.execute(
             """
             UPDATE async_tasks
-            SET status=?, result=?, error=?, updated_at=CURRENT_TIMESTAMP
-            WHERE task_id=?
+            SET stage=?, updated_at=CURRENT_TIMESTAMP
+            WHERE task_id=? AND IFNULL(stage, '') != ?
             """,
-            (status.strip(), result, error, task_id.strip()),
+            (clean_stage, task_id.strip(), clean_stage),
         )
         conn.commit()
     return int(cur.rowcount or 0)
@@ -267,7 +320,8 @@ def get_async_task(task_id: str) -> dict[str, Any] | None:
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT task_id, user_id, task_type, payload, status, result, error, created_at, updated_at
+            SELECT task_id, user_id, task_type, payload, status, result, error,
+                   stage, chat_id, progress_message_id, created_at, updated_at
             FROM async_tasks
             WHERE task_id=?
             """,
