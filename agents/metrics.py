@@ -54,6 +54,14 @@ agent_async_queue_lag_seconds = Gauge(
 )
 
 
+def ensure_baseline_metric_series() -> None:
+    """Export labeled counter children so Grafana panels show 0 instead of No data."""
+    agent_router_decisions_total.labels(decision="search")
+    agent_router_decisions_total.labels(decision="no_search")
+    # Baseline fallback series (no event yet); real pairs appear on first failover.
+    agent_llm_fallback_total.labels(from_provider="none", to_provider="none")
+
+
 def observe_llm_fallback(from_provider: str, to_provider: str) -> None:
     agent_llm_fallback_total.labels(
         from_provider=from_provider.strip().lower() or "unknown",

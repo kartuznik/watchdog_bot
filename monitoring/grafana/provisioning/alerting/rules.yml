@@ -18,7 +18,7 @@ groups:
             model:
               editorMode: code
               exemplar: false
-              expr: (sum(rate(agent_requests_failed_total{job="ai-agent-bot"}[5m])) / clamp_min(sum(rate(agent_requests_failed_total{job="ai-agent-bot"}[5m])) + sum(rate(agent_requests_total{job="ai-agent-bot"}[5m])), 1e-9)) * 100
+              expr: (sum(rate(agent_requests_failed_total{job="watchdog-bot"}[5m])) / clamp_min(sum(rate(agent_requests_failed_total{job="watchdog-bot"}[5m])) + sum(rate(agent_requests_total{job="watchdog-bot"}[5m])), 1e-9)) * 100
               intervalMs: 1000
               maxDataPoints: 43200
               range: true
@@ -87,7 +87,7 @@ groups:
             model:
               editorMode: code
               exemplar: false
-              expr: max(agent_async_queue_lag_seconds{job="ai-agent-bot"})
+              expr: max(agent_async_queue_lag_seconds{job="watchdog-bot"})
               intervalMs: 1000
               maxDataPoints: 43200
               range: true
@@ -156,7 +156,7 @@ groups:
             model:
               editorMode: code
               exemplar: false
-              expr: sum(increase(agent_llm_fallback_total{job="ai-agent-bot"}[10m]))
+              expr: sum(increase(agent_llm_fallback_total{job="watchdog-bot"}[10m]))
               intervalMs: 1000
               maxDataPoints: 43200
               range: true

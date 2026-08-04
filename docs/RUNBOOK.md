@@ -18,7 +18,7 @@ docker compose ps
    - Bot polling logs are healthy (`docker compose logs --tail=100 bot`).
    - Metrics scrape target is up in Prometheus.
    - Admin panel answers Basic Auth on the admin service port.
-   - Grafana loads the **AI Agent Overview** dashboard and alerting contact point `telegram-owner`.
+   - Grafana loads the **Watchdog Bot Overview** dashboard (folder **Watchdog**) and alerting contact point `telegram-owner`.
 
 After code changes that affect runtime, rebuild only the touched services, for example:
 
