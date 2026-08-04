@@ -9,7 +9,12 @@ from urllib.parse import urlparse
 
 from arq.connections import RedisSettings
 
-from agents.database import init_db, update_async_task_stage, update_async_task_status
+from agents.database import (
+    init_db,
+    record_usage_event,
+    update_async_task_stage,
+    update_async_task_status,
+)
 from agents.metrics import observe_token_usage
 from agents.multi_agent import (
     HistoryMessage,
@@ -75,11 +80,25 @@ async def process_research_task(
         draft = str(merged.get("draft", "")).strip()
         if not draft:
             draft = "Пустой результат от research worker."
+        prompt_tokens = int(merged.get("llm_prompt_tokens", 0) or 0)
+        completion_tokens = int(merged.get("llm_completion_tokens", 0) or 0)
+        estimated_cost = float(merged.get("estimated_cost_usd", 0.0) or 0.0)
+        need_search = bool(merged.get("need_web_search", False))
         observe_token_usage(
-            int(merged.get("llm_prompt_tokens", 0) or 0),
-            int(merged.get("llm_completion_tokens", 0) or 0),
-            cost_usd=float(merged.get("estimated_cost_usd", 0.0) or 0.0),
+            prompt_tokens,
+            completion_tokens,
+            cost_usd=estimated_cost,
         )
+        try:
+            record_usage_event(
+                user_id=user_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                estimated_cost_usd=estimated_cost,
+                router_decision="search" if need_search else "no_search",
+            )
+        except Exception:
+            pass
         payload = {
             "topic": topic,
             "draft": draft,
@@ -87,10 +106,10 @@ async def process_research_task(
             "research_data": str(merged.get("research_data", "") or "").strip(),
             "web_sources": list(merged.get("web_sources") or []),
             "revision_count": int(merged.get("revision_count", 0) or 0),
-            "llm_prompt_tokens": int(merged.get("llm_prompt_tokens", 0) or 0),
-            "llm_completion_tokens": int(merged.get("llm_completion_tokens", 0) or 0),
-            "estimated_cost_usd": float(merged.get("estimated_cost_usd", 0.0) or 0.0),
-            "need_web_search": bool(merged.get("need_web_search", False)),
+            "llm_prompt_tokens": prompt_tokens,
+            "llm_completion_tokens": completion_tokens,
+            "estimated_cost_usd": estimated_cost,
+            "need_web_search": need_search,
             "router_mode": str(merged.get("router_mode", "") or ""),
             "router_reason": str(merged.get("router_reason", "") or ""),
         }

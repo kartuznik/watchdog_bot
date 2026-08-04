@@ -82,7 +82,12 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin123}"
       GF_DEFAULT_APP_TIMEZONE: "Europe/Helsinki"
+      GF_UNIFIED_ALERTING_ENABLED: "true"
       TZ: "Europe/Helsinki"
+      # Telegram contact point reads these via $__env{...} (no secrets in YAML).
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
+      # Set TELEGRAM_ALERT_CHAT_ID in .env (usually same as OWNER_ID).
+      TELEGRAM_ALERT_CHAT_ID: "${TELEGRAM_ALERT_CHAT_ID}"
     depends_on:
       - prometheus
     restart: unless-stopped

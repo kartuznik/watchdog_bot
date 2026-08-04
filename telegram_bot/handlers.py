@@ -28,6 +28,9 @@ from agents.database import (
     count_users,
     create_async_task,
     get_async_task,
+    is_user_soft_deleted,
+    record_usage_event,
+    soft_delete_gate_enabled,
     update_async_task_status,
 )
 from agents.health_check import HealthCheckService
@@ -295,6 +298,12 @@ async def _run_research_flow(message: Message, topic: str) -> None:
         return
 
     user_id = message.from_user.id if message.from_user else 0
+    if soft_delete_gate_enabled() and is_user_soft_deleted(user_id):
+        await message.answer(
+            "Доступ временно ограничен: данные пользователя помечены на удаление.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
     conversation_history = chat_memory.get_user_memory(user_id)
     progress = ProgressReporter(message.bot, message.chat.id)
 
@@ -344,6 +353,17 @@ async def _run_research_flow(message: Message, topic: str) -> None:
             result.get("llm_completion_tokens", 0),
             cost_usd=float(result.get("estimated_cost_usd", 0.0) or 0.0),
         )
+        router_decision = (
+            "search" if bool(result.get("need_web_search", False)) else "no_search"
+        )
+        with suppress(Exception):
+            record_usage_event(
+                user_id=user_id,
+                prompt_tokens=int(result.get("llm_prompt_tokens", 0) or 0),
+                completion_tokens=int(result.get("llm_completion_tokens", 0) or 0),
+                estimated_cost_usd=float(result.get("estimated_cost_usd", 0.0) or 0.0),
+                router_decision=router_decision,
+            )
         role = get_role(user_id)
         outgoing = build_result_messages(
             dict(result),

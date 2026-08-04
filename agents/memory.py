@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, List
 
-from agents.database import ensure_user, get_connection
+from agents.database import ensure_user, get_connection, soft_delete_conversations
 
 
 class ChatMemory:
@@ -42,7 +42,7 @@ class ChatMemory:
                     FROM (
                         SELECT id, role, content
                         FROM conversations
-                        WHERE user_id=?
+                        WHERE user_id=? AND deleted_at IS NULL
                         ORDER BY id DESC
                         LIMIT ?
                     ) t
@@ -62,14 +62,11 @@ class ChatMemory:
         return self.get(user_id)
 
     def clear_user_memory(self, user_id: int) -> int:
+        """Soft-delete conversation rows for the user (default retention path)."""
         try:
-            with get_connection() as conn:
-                cur = conn.execute(
-                    "DELETE FROM conversations WHERE user_id=?",
-                    (str(user_id),),
-                )
-                conn.commit()
-                return int(cur.rowcount or 0)
+            deleted = soft_delete_conversations(user_id=user_id)
+            self._store[user_id].clear()
+            return deleted
         except Exception:
             deleted = len(self._store[user_id])
             self._store[user_id].clear()

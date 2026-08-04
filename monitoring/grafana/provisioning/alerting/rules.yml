@@ -1,0 +1,214 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: watchdog-alerts
+    folder: Watchdog
+    interval: 1m
+    rules:
+      - uid: wd-high-error-rate
+        title: High error rate
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              editorMode: code
+              exemplar: false
+              expr: (sum(rate(agent_requests_failed_total{job="ai-agent-bot"}[5m])) / clamp_min(sum(rate(agent_requests_failed_total{job="ai-agent-bot"}[5m])) + sum(rate(agent_requests_total{job="ai-agent-bot"}[5m])), 1e-9)) * 100
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: true
+              refId: A
+          - refId: B
+            datasourceUid: "__expr__"
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              datasource:
+                type: "__expr__"
+                uid: "__expr__"
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              type: reduce
+              refId: B
+          - refId: C
+            datasourceUid: "__expr__"
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              datasource:
+                type: "__expr__"
+                uid: "__expr__"
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 5
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              type: threshold
+              refId: C
+        for: 2m
+        noDataState: OK
+        execErrState: OK
+        annotations:
+          summary: Error rate above 5% over 5 minutes
+          description: Share of failed multi-agent requests exceeded 5% on the 5m window.
+        labels:
+          alertname: HighErrorRate
+          severity: warning
+          alert_type: errors
+
+      - uid: wd-queue-lag
+        title: Async queue lag high
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              editorMode: code
+              exemplar: false
+              expr: max(agent_async_queue_lag_seconds{job="ai-agent-bot"})
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: true
+              refId: A
+          - refId: B
+            datasourceUid: "__expr__"
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              datasource:
+                type: "__expr__"
+                uid: "__expr__"
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              type: reduce
+              refId: B
+          - refId: C
+            datasourceUid: "__expr__"
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              datasource:
+                type: "__expr__"
+                uid: "__expr__"
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 300
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              type: threshold
+              refId: C
+        for: 2m
+        noDataState: OK
+        execErrState: OK
+        annotations:
+          summary: Background queue lag above 5 minutes
+          description: Oldest queued/running async_task is older than 300 seconds.
+        labels:
+          alertname: AsyncQueueLag
+          severity: warning
+          alert_type: queue
+
+      - uid: wd-llm-fallback
+        title: LLM provider fallback
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              editorMode: code
+              exemplar: false
+              expr: sum(increase(agent_llm_fallback_total{job="ai-agent-bot"}[10m]))
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: true
+              refId: A
+          - refId: B
+            datasourceUid: "__expr__"
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              datasource:
+                type: "__expr__"
+                uid: "__expr__"
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              type: reduce
+              refId: B
+          - refId: C
+            datasourceUid: "__expr__"
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              datasource:
+                type: "__expr__"
+                uid: "__expr__"
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              type: threshold
+              refId: C
+        for: 1m
+        noDataState: OK
+        execErrState: OK
+        annotations:
+          summary: LLM fallback activity in the last 10 minutes
+          description: Primary LLM provider failed over to the secondary provider at least once.
+        labels:
+          alertname: LLMProviderFallback
+          severity: warning
+          alert_type: llm

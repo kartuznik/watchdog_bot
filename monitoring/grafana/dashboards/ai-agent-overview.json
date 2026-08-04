@@ -8,22 +8,9 @@
   "links": [],
   "panels": [
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqpm"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 0
-      },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqpm" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "id": 1,
       "targets": [
         {
@@ -35,22 +22,9 @@
       "type": "timeseries"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "id": 2,
       "targets": [
         {
@@ -62,22 +36,9 @@
       "type": "timeseries"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 0,
-        "y": 8
-      },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
       "id": 3,
       "targets": [
         {
@@ -89,22 +50,9 @@
       "type": "stat"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
-        "y": 8
-      },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
       "id": 4,
       "targets": [
         {
@@ -116,22 +64,9 @@
       "type": "stat"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 8
-      },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 8 },
       "id": 5,
       "targets": [
         {
@@ -141,24 +76,74 @@
       ],
       "title": "LLM Tokens Used (24h)",
       "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 8 },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "sum(increase(agent_estimated_cost_usd_total{job=\"ai-agent-bot\"}[24h]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Estimated Cost (24h)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 14 },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "sum by (decision) (increase(agent_router_decisions_total{job=\"ai-agent-bot\"}[24h]))",
+          "legendFormat": "{{decision}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Router Decisions (24h)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 14 },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "sum by (from_provider,to_provider) (increase(agent_llm_fallback_total{job=\"ai-agent-bot\"}[24h]))",
+          "legendFormat": "{{from_provider}}→{{to_provider}}",
+          "refId": "A"
+        }
+      ],
+      "title": "LLM Fallback (24h)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 14 },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "max(agent_async_queue_lag_seconds{job=\"ai-agent-bot\"})",
+          "refId": "A"
+        }
+      ],
+      "title": "Async Queue Lag",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",
   "schemaVersion": 39,
   "style": "dark",
-  "tags": [
-    "ai-agent",
-    "monitoring"
-  ],
-  "templating": {
-    "list": []
-  },
-  "time": {
-    "from": "now-6h",
-    "to": "now"
-  },
+  "tags": ["ai-agent", "monitoring"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
   "timezone": "",
   "title": "AI Agent Overview",
   "uid": "ai-agent-overview",
-  "version": 1
+  "version": 2
 }

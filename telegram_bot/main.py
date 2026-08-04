@@ -14,6 +14,7 @@ from prometheus_client import start_http_server
 
 from agents.database import init_db
 from agents.health_check import HealthCheckService
+from agents.metrics import refresh_async_queue_lag
 from agents.monitor_agent import run_monitor_agent
 from agents.roles import get_owner_id, set_role
 from config import is_module_enabled
@@ -22,6 +23,17 @@ from telegram_bot.middlewares.role_check import RoleCheckMiddleware
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _queue_lag_loop(interval_seconds: int = 30) -> None:
+    """Publish async queue lag gauge from SQLite (bot-side, no extra port)."""
+    while True:
+        try:
+            lag = refresh_async_queue_lag()
+            logger.debug("async_queue_lag_seconds=%.1f", lag)
+        except Exception:
+            logger.exception("Failed to refresh async queue lag metric")
+        await asyncio.sleep(max(10, interval_seconds))
 
 
 async def _monitor_loop(
@@ -71,7 +83,9 @@ async def main() -> None:
     dp.message.middleware(RoleCheckMiddleware())
     dp.include_router(router)
 
-    background_tasks: list[asyncio.Task] = []
+    background_tasks: list[asyncio.Task] = [
+        asyncio.create_task(_queue_lag_loop(interval_seconds=30)),
+    ]
     if is_module_enabled("self_diagnostics"):
         health_checker = HealthCheckService(bot=bot, admin_user_id=owner_id)
         configure_runtime_services(health_checker=health_checker)

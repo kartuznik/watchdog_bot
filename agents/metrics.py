@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 from agents.llm_config import LLMConfig
 
@@ -48,6 +48,11 @@ agent_router_decisions_total = Counter(
     ["decision"],
 )
 
+agent_async_queue_lag_seconds = Gauge(
+    "agent_async_queue_lag_seconds",
+    "Max age in seconds of queued/running async_tasks (bot-side SQLite poll).",
+)
+
 
 def observe_llm_fallback(from_provider: str, to_provider: str) -> None:
     agent_llm_fallback_total.labels(
@@ -80,3 +85,16 @@ def observe_token_usage(
     )
     if estimated > 0:
         agent_estimated_cost_usd_total.inc(estimated)
+
+
+def set_async_queue_lag_seconds(lag_seconds: float) -> None:
+    agent_async_queue_lag_seconds.set(max(0.0, float(lag_seconds)))
+
+
+def refresh_async_queue_lag() -> float:
+    """Read SQLite queue lag and publish gauge. Returns the lag value."""
+    from agents.database import compute_async_queue_lag_seconds
+
+    lag = compute_async_queue_lag_seconds()
+    set_async_queue_lag_seconds(lag)
+    return lag
