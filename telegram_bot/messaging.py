@@ -6,7 +6,6 @@ import html
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -117,36 +116,28 @@ def _strip_source_appendix(draft: str) -> str:
     return "\n".join(lines).strip()
 
 
-def source_display_domain(url: str) -> str:
-    """Return a short hostname for optional display (no path/query)."""
-    raw = (url or "").strip()
-    if not raw:
-        return ""
-    try:
-        host = urlparse(raw).hostname or ""
-    except Exception:
-        host = ""
-    if not host and "://" not in raw:
-        host = raw.split("/", 1)[0]
-    host = host.lower().removeprefix("www.")
-    return host
-
-
 def format_sources_list_html(
     sources: list[SourceItem],
     *,
     limit: int = 5,
-    include_domain: bool = True,
+    include_domain: bool = False,
 ) -> str:
-    """Numbered titles only — full URLs live on inline buttons, not in message text."""
+    """
+    Numbered clickable titles as HTML anchors to the full article URL.
+    Domains in parentheses are not used (Telegram would autolink them to site roots).
+    Inline buttons still carry the same URLs separately.
+    """
+    del include_domain  # deprecated: bare domains caused misleading autolinks
     lines: list[str] = []
     for index, item in enumerate(sources[:limit], start=1):
-        title = _escape(item["title"] or item["url"] or "Источник")
-        domain = source_display_domain(item["url"]) if include_domain else ""
-        if domain:
-            lines.append(f"{index}. <b>{title}</b> ({_escape(domain)})")
-        else:
+        raw_url = str(item.get("url") or "").strip()
+        raw_title = str(item.get("title") or raw_url or "Источник").strip()
+        title = html.escape(raw_title, quote=False)
+        if not raw_url:
             lines.append(f"{index}. <b>{title}</b>")
+            continue
+        href = html.escape(raw_url, quote=True)
+        lines.append(f'{index}. <a href="{href}"><b>{title}</b></a>')
     return "\n".join(lines)
 
 

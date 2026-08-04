@@ -95,26 +95,24 @@ def test_sources_numbered_list_and_inline_keyboard() -> None:
     assert "1." in sources_msg.text
     assert "Статья о Перельмане" in sources_msg.text
     assert "Источник:" not in sources_msg.text
-    # Full URLs belong on buttons only — not in message text.
-    assert "https://" not in sources_msg.text
-    assert "http://" not in sources_msg.text
-    # Optional short domain in parentheses is OK.
-    assert "(example.com)" in sources_msg.text
+    # Clickable HTML anchors with full article URLs (not bare domains).
+    assert 'href="https://example.com/perelman"' in sources_msg.text
+    assert 'href="https://example.com/ricci"' in sources_msg.text
+    assert "(example.com)" not in sources_msg.text
     assert sources_msg.reply_markup is not None
     keyboard = sources_msg.reply_markup
     assert len(keyboard.inline_keyboard) == 2
     assert keyboard.inline_keyboard[0][0].url == "https://example.com/perelman"
     assert keyboard.inline_keyboard[1][0].url == "https://example.com/ricci"
 
-    html_list = format_sources_list_html(_sample_result()["web_sources"])
-    assert "<b>Статья о Перельмане</b>" in html_list
-    assert "https://" not in html_list
-    assert "(example.com)" in html_list
-    html_no_domain = format_sources_list_html(
-        _sample_result()["web_sources"],
-        include_domain=False,
+    encoded = "https://example.com/path%20with%20space?q=1&x=2"
+    html_list = format_sources_list_html(
+        [{"title": "Title <script>& more", "url": encoded}]
     )
-    assert "(example.com)" not in html_no_domain
+    assert 'href="https://example.com/path%20with%20space?q=1&amp;x=2"' in html_list
+    assert "<b>Title &lt;script&gt;&amp; more</b>" in html_list
+    assert "(example.com)" not in html_list
+    assert html_list.startswith('1. <a href="')
     kb = build_sources_keyboard(_sample_result()["web_sources"])
     assert kb is not None
     long_label_kb = build_sources_keyboard(
