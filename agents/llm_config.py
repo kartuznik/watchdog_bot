@@ -48,42 +48,74 @@ class LLMConfig:
         return provider
 
     @classmethod
-    def get_api_key(cls) -> str:
-        provider = cls.get_provider()
+    def alternate_provider(cls, provider: str | None = None) -> str:
+        current = (provider or cls.get_provider()).strip().lower()
+        if current == cls.OPENAI_PROVIDER:
+            return cls.DEEPSEEK_PROVIDER
+        return cls.OPENAI_PROVIDER
+
+    @classmethod
+    def get_api_key(cls, provider: str | None = None) -> str:
+        resolved = (provider or cls.get_provider()).strip().lower()
         key_name = (
             "OPENAI_API_KEY"
-            if provider == cls.OPENAI_PROVIDER
+            if resolved == cls.OPENAI_PROVIDER
             else "DEEPSEEK_API_KEY"
         )
         api_key = os.getenv(key_name, "").strip()
         if not api_key:
             provider_hint = (
                 "Set OPENAI_API_KEY in .env."
-                if provider == cls.OPENAI_PROVIDER
+                if resolved == cls.OPENAI_PROVIDER
                 else (
                     "Set DEEPSEEK_API_KEY in .env "
                     "(get one at https://platform.deepseek.com)."
                 )
             )
             raise ValueError(
-                f"API key is missing for provider '{provider}'. {provider_hint}"
+                f"API key is missing for provider '{resolved}'. {provider_hint}"
             )
         return api_key
 
     @classmethod
-    def get_base_url(cls) -> str:
-        provider = cls.get_provider()
-        if provider == cls.OPENAI_PROVIDER:
+    def get_base_url(cls, provider: str | None = None) -> str:
+        resolved = (provider or cls.get_provider()).strip().lower()
+        if resolved == cls.OPENAI_PROVIDER:
             return os.getenv("OPENAI_BASE_URL", cls.DEFAULT_OPENAI_BASE_URL).strip()
         return os.getenv("DEEPSEEK_BASE_URL", cls.DEFAULT_DEEPSEEK_BASE_URL).strip()
 
     @classmethod
-    def get_model_name(cls) -> str:
-        model_name = os.getenv("MODEL_NAME", "").strip()
-        if model_name:
-            return model_name
-        provider = cls.get_provider()
-        return cls.DEFAULT_MODEL_BY_PROVIDER[provider]
+    def get_model_name(cls, provider: str | None = None) -> str:
+        resolved = (provider or cls.get_provider()).strip().lower()
+        # Env MODEL_NAME applies only to the primary configured provider.
+        if provider is None or resolved == cls.get_provider():
+            model_name = os.getenv("MODEL_NAME", "").strip()
+            if model_name:
+                return model_name
+        return cls.DEFAULT_MODEL_BY_PROVIDER[resolved]
+
+    @classmethod
+    def is_llm_auth_or_balance_error(cls, exc: BaseException) -> bool:
+        """Detect provider auth/billing failures that justify OpenAI↔DeepSeek fallback."""
+        status = getattr(exc, "status_code", None)
+        if status in {401, 402, 403}:
+            return True
+        response = getattr(exc, "response", None)
+        if response is not None:
+            response_status = getattr(response, "status_code", None)
+            if response_status in {401, 402, 403}:
+                return True
+        body = getattr(exc, "body", None)
+        text = f"{exc} {body if body is not None else ''}".lower()
+        markers = (
+            "insufficient balance",
+            "invalid api key",
+            "authentication",
+            "unauthorized",
+            "permission denied",
+            "exceeded your current quota",
+        )
+        return any(marker in text for marker in markers)
 
     @classmethod
     def estimate_cost_usd(
@@ -106,15 +138,25 @@ class LLMConfig:
         return (prompt * input_price + completion * output_price) / 1_000_000.0
 
     @classmethod
-    def create_chat_model(cls, temperature: float = 0) -> ChatOpenAI:
-        provider = cls.get_provider()
-        model_name = cls.get_model_name()
-        base_url = cls.get_base_url()
-        api_key = cls.get_api_key()
+    def create_chat_model(
+        cls,
+        temperature: float = 0,
+        *,
+        provider: str | None = None,
+    ) -> ChatOpenAI:
+        resolved_provider = (provider or cls.get_provider()).strip().lower()
+        if resolved_provider not in {cls.OPENAI_PROVIDER, cls.DEEPSEEK_PROVIDER}:
+            raise ValueError(
+                "Unsupported LLM_PROVIDER. Use 'openai' or 'deepseek'. "
+                "See .env.example for valid values."
+            )
+        model_name = cls.get_model_name(resolved_provider)
+        base_url = cls.get_base_url(resolved_provider)
+        api_key = cls.get_api_key(resolved_provider)
 
         logger.info(
             "Creating chat model with provider=%s model=%s base_url=%s",
-            provider,
+            resolved_provider,
             model_name,
             base_url,
         )

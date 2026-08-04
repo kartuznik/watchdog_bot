@@ -36,6 +36,19 @@ agent_estimated_cost_usd_total = Counter(
     "Estimated LLM spend in USD (approximate catalog prices).",
 )
 
+agent_llm_fallback_total = Counter(
+    "agent_llm_fallback_total",
+    "LLM provider fallback events (OpenAI ↔ DeepSeek).",
+    ["from_provider", "to_provider"],
+)
+
+
+def observe_llm_fallback(from_provider: str, to_provider: str) -> None:
+    agent_llm_fallback_total.labels(
+        from_provider=from_provider.strip().lower() or "unknown",
+        to_provider=to_provider.strip().lower() or "unknown",
+    ).inc()
+
 
 def observe_token_usage(
     prompt_tokens: int,

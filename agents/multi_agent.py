@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 
 from agents.llm_config import LLMConfig
+from agents.metrics import observe_llm_fallback
 from agents.tg_parser import extract_telegram_usernames, fetch_many_channels_async
 from agents.web_search import WebSearchTool
 from config import is_module_enabled
@@ -92,20 +93,52 @@ async def _invoke_llm(
     user_prompt: str,
     temperature: float = 0.2,
 ) -> tuple[str, int, int] | None:
-    try:
-        llm = LLMConfig.create_chat_model(temperature=temperature)
-    except ValueError:
-        logger.info("LLM unavailable, fallback to deterministic mode")
-        return None
-    response = await llm.ainvoke(
-        [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
-    )
-    text = _strip_text(getattr(response, "content", ""))
-    prompt_tokens, completion_tokens = _extract_usage(response)
-    return text, prompt_tokens, completion_tokens
+    """Invoke primary LLM with automatic OpenAI↔DeepSeek fallback on auth/billing errors."""
+    primary = LLMConfig.get_provider()
+    providers = [primary]
+    alternate = LLMConfig.alternate_provider(primary)
+    if alternate != primary:
+        providers.append(alternate)
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+    last_error: BaseException | None = None
+
+    for index, provider in enumerate(providers):
+        try:
+            llm = LLMConfig.create_chat_model(temperature=temperature, provider=provider)
+        except ValueError as exc:
+            logger.info("LLM provider %s unavailable: %s", provider, exc)
+            last_error = exc
+            continue
+        try:
+            response = await llm.ainvoke(messages)
+        except Exception as exc:
+            last_error = exc
+            if index == 0 and LLMConfig.is_llm_auth_or_balance_error(exc):
+                logger.warning(
+                    "LLM provider %s failed with auth/billing error (%s); trying %s",
+                    provider,
+                    type(exc).__name__,
+                    alternate,
+                )
+                continue
+            raise
+        if index > 0:
+            observe_llm_fallback(primary, provider)
+            logger.info("LLM fallback succeeded: %s -> %s", primary, provider)
+        text = _strip_text(getattr(response, "content", ""))
+        prompt_tokens, completion_tokens = _extract_usage(response)
+        return text, prompt_tokens, completion_tokens
+
+    if last_error is not None:
+        logger.info(
+            "All LLM providers failed (%s); using deterministic mode",
+            type(last_error).__name__,
+        )
+    return None
 
 
 def _history_as_text(history: list[HistoryMessage], limit: int = 8) -> str:

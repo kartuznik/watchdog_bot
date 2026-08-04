@@ -37,7 +37,6 @@ from agents.multi_agent import (
     MultiAgentState,
     build_initial_multi_agent_state,
     build_multi_agent_graph,
-    ensure_sources_block,
 )
 from agents.memory import ChatMemory
 from agents.metrics import (
@@ -48,6 +47,12 @@ from agents.metrics import (
 )
 from agents.roles import get_role, list_admins, remove_role, set_role
 from config import is_module_enabled
+from telegram_bot.messaging import (
+    build_result_message_parts,
+    chunk_text,
+    format_user_facing_error,
+    shorten_for_memory,
+)
 from telegram_bot.middlewares.role_check import require_role
 
 logger = logging.getLogger(__name__)
@@ -69,24 +74,21 @@ def set_last_monitor_state(state: MonitorAgentState) -> None:
     runtime_last_monitor_state = state
 
 
-def _format_result_markdown(result: MultiAgentState) -> str:
-    topic = result["topic"]
-    research_data = result["research_data"]
-    draft = ensure_sources_block(result["draft"], list(result.get("web_sources") or []))
-    cost = float(result.get("estimated_cost_usd", 0.0) or 0.0)
-    tokens = int(result.get("llm_prompt_tokens", 0) or 0) + int(
-        result.get("llm_completion_tokens", 0) or 0
-    )
-    return (
-        "## ✅ Готово\n"
-        f"**Тема:** {topic}\n\n"
-        "### 🔬 Research\n"
-        f"{research_data}\n\n"
-        "### 📝 Draft\n"
-        f"{draft}\n\n"
-        f"_Итераций ревью: {result['revision_count']} · "
-        f"tokens≈{tokens} · cost≈${cost:.6f}_"
-    )
+async def _answer_chunks(
+    message: Message,
+    parts: list[str],
+    *,
+    parse_mode: ParseMode | None = ParseMode.MARKDOWN,
+) -> None:
+    """Send one or more Telegram-safe chunks sequentially."""
+    for part in parts:
+        if not part.strip():
+            continue
+        try:
+            await message.answer(part, parse_mode=parse_mode)
+        except Exception:
+            # Markdown can fail on model output; retry as plain text.
+            await message.answer(part, parse_mode=None)
 
 
 def _redis_settings_from_env() -> RedisSettings | None:
@@ -171,11 +173,14 @@ async def _poll_task_and_send_result(
         if status == "done":
             result = str(task.get("result", "")).strip() or "Пустой ответ от worker."
             chat_memory.save_user_memory(user_id, topic, result)
-            await message.answer(f"✅ Фоновая задача завершена:\n\n{result}")
+            parts = chunk_text(f"✅ Фоновая задача завершена:\n\n{result}")
+            await _answer_chunks(message, parts, parse_mode=None)
             return
         if status == "failed":
             error = str(task.get("error", "")).strip() or "неизвестная ошибка"
-            await message.answer(f"❌ Фоновая задача завершилась ошибкой: {error}")
+            # Keep worker errors honest but avoid leaking raw secrets/keys.
+            safe = format_user_facing_error(RuntimeError(error))
+            await message.answer(f"❌ Фоновая задача завершилась ошибкой.\n{safe}")
             return
         await asyncio.sleep(5)
     await message.answer(
@@ -242,21 +247,19 @@ async def _run_research_flow(message: Message, topic: str) -> None:
             result.get("llm_completion_tokens", 0),
             cost_usd=float(result.get("estimated_cost_usd", 0.0) or 0.0),
         )
-        draft = ensure_sources_block(
-            result["draft"],
-            list(result.get("web_sources") or []),
+        parts = build_result_message_parts(result)
+        chat_memory.save_user_memory(
+            user_id,
+            topic.strip(),
+            shorten_for_memory(parts),
         )
-        chat_memory.save_user_memory(user_id, topic.strip(), draft)
-        await message.answer(
-            _format_result_markdown(result),
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    except Exception:
+        await _answer_chunks(message, parts)
+    except Exception as exc:
         elapsed = time.perf_counter() - started_at
         agent_requests_failed_total.inc()
         agent_request_duration_seconds.observe(elapsed)
         logger.exception("Multi-agent graph execution failed for user_id=%s", user_id)
-        await message.answer("Произошла ошибка, попробуйте позже.")
+        await message.answer(format_user_facing_error(exc))
     finally:
         typing_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -265,8 +268,10 @@ async def _run_research_flow(message: Message, topic: str) -> None:
 
 async def _typing_pulse(message: Message) -> None:
     """Send typing action periodically while long graph run is in progress."""
+    chat_id = message.chat.id
+    bot = message.bot
     while True:
-        await message.answer_chat_action(action=ChatAction.TYPING)
+        await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         await asyncio.sleep(4)
 
 

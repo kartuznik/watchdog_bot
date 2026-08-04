@@ -149,11 +149,18 @@ python -m telegram_bot.main
 - **Prometheus**: `http://<host>:9091`
 - **Grafana**: `http://<host>:3001`
 
-Метрики токенов/стоимости:
+Метрики токенов/стоимости/fallback:
 
 - `agent_prompt_tokens_total`
 - `agent_completion_tokens_total`
 - `agent_estimated_cost_usd_total`
+- `agent_llm_fallback_total{from_provider,to_provider}`
+
+### Операционные заметки
+
+- **Лимит Telegram 4096:** финальный ответ режется на чанки ≤3800 символов; сначала уходит Draft (+ источники), затем краткий Research.
+- **Tavily:** нужен *валидный* `TAVILY_API_KEY`. Невалидный ключ даёт soft-fail поиска и честное предупреждение пользователю; секреты в git не коммитятся (только серверный `.env`).
+- **LLM fallback:** при 401/402/403 или `Insufficient Balance` бот автоматически пробует второй провайдер (OpenAI ↔ DeepSeek), пишет лог и инкрементирует `agent_llm_fallback_total`.
 
 ## Решение проблем
 
@@ -161,7 +168,9 @@ python -m telegram_bot.main
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN is not set` | пустой `.env` | заполните токен и перезапустите |
 | `TelegramConflictError` | два polling на одном токене | оставьте один инстанс на токен |
-| Нет источников в ответе | нет/`bad` `TAVILY_API_KEY` или выключен `web_search` | задайте ключ / флаг |
+| Нет источников / InvalidAPIKey Tavily | просроченный/`bad` `TAVILY_API_KEY` | обновите ключ в серверном `.env`, `docker compose up -d --build bot worker` |
+| `message is too long` | ответ >4096 | обновлённый код шлёт чанки; пересоберите bot |
+| LLM 401/402/403 / Insufficient Balance | ключ/баланс провайдера | пополните баланс или положитесь на fallback; проверьте оба ключа |
 | Worker без контекста | старая версия | обновите: history передаётся в ARQ |
 | `database is locked` | старый journal mode | WAL включён в `get_connection()` — перезапустите сервисы |
 | `401` на админке | неверный пароль | `admin` + `ADMIN_PASSWORD` |
