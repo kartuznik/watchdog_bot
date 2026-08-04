@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 from urllib.parse import urlparse
@@ -14,7 +15,6 @@ from agents.multi_agent import (
     HistoryMessage,
     build_initial_multi_agent_state,
     build_multi_agent_graph,
-    ensure_sources_block,
 )
 
 
@@ -61,10 +61,7 @@ async def process_research_task(
     )
     try:
         result = await graph.ainvoke(initial_state)
-        draft = ensure_sources_block(
-            str(result.get("draft", "")).strip(),
-            list(result.get("web_sources") or []),
-        )
+        draft = str(result.get("draft", "")).strip()
         if not draft:
             draft = "Пустой результат от research worker."
         observe_token_usage(
@@ -72,8 +69,20 @@ async def process_research_task(
             int(result.get("llm_completion_tokens", 0) or 0),
             cost_usd=float(result.get("estimated_cost_usd", 0.0) or 0.0),
         )
-        update_async_task_status(task_id, status="done", result=draft)
-        return draft
+        payload = {
+            "topic": topic,
+            "draft": draft,
+            "research_summary": str(result.get("research_summary", "") or "").strip(),
+            "research_data": str(result.get("research_data", "") or "").strip(),
+            "web_sources": list(result.get("web_sources") or []),
+            "revision_count": int(result.get("revision_count", 0) or 0),
+            "llm_prompt_tokens": int(result.get("llm_prompt_tokens", 0) or 0),
+            "llm_completion_tokens": int(result.get("llm_completion_tokens", 0) or 0),
+            "estimated_cost_usd": float(result.get("estimated_cost_usd", 0.0) or 0.0),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False)
+        update_async_task_status(task_id, status="done", result=encoded)
+        return encoded
     except Exception as exc:
         update_async_task_status(task_id, status="failed", error=str(exc))
         raise

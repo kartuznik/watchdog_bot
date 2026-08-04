@@ -15,7 +15,7 @@ from typing import cast
 from aiogram import Router
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardMarkup, Message
 
 try:
     from arq.connections import RedisSettings, create_pool
@@ -48,7 +48,8 @@ from agents.metrics import (
 from agents.roles import get_role, list_admins, remove_role, set_role
 from config import is_module_enabled
 from telegram_bot.messaging import (
-    build_result_message_parts,
+    OutgoingMessage,
+    build_result_messages,
     chunk_text,
     format_user_facing_error,
     shorten_for_memory,
@@ -76,19 +77,25 @@ def set_last_monitor_state(state: MonitorAgentState) -> None:
 
 async def _answer_chunks(
     message: Message,
-    parts: list[str],
+    parts: list[str] | list[OutgoingMessage],
     *,
-    parse_mode: ParseMode | None = ParseMode.MARKDOWN,
+    parse_mode: ParseMode | None = ParseMode.HTML,
 ) -> None:
-    """Send one or more Telegram-safe chunks sequentially."""
+    """Send one or more Telegram-safe chunks sequentially (HTML by default)."""
     for part in parts:
-        if not part.strip():
+        markup: InlineKeyboardMarkup | None = None
+        if isinstance(part, OutgoingMessage):
+            text = part.text
+            markup = part.reply_markup
+        else:
+            text = part
+        if not str(text).strip():
             continue
         try:
-            await message.answer(part, parse_mode=parse_mode)
+            await message.answer(text, parse_mode=parse_mode, reply_markup=markup)
         except Exception:
-            # Markdown can fail on model output; retry as plain text.
-            await message.answer(part, parse_mode=None)
+            # HTML can fail on rare edge cases; retry as plain text without markup tags intent.
+            await message.answer(text, parse_mode=None, reply_markup=markup)
 
 
 def _redis_settings_from_env() -> RedisSettings | None:
@@ -171,9 +178,29 @@ async def _poll_task_and_send_result(
             continue
         status = str(task.get("status", "queued")).strip().lower()
         if status == "done":
-            result = str(task.get("result", "")).strip() or "Пустой ответ от worker."
-            chat_memory.save_user_memory(user_id, topic, result)
-            parts = chunk_text(f"✅ Фоновая задача завершена:\n\n{result}")
+            raw = str(task.get("result", "")).strip() or "Пустой ответ от worker."
+            role = get_role(user_id)
+            try:
+                import json
+
+                payload = json.loads(raw)
+                if isinstance(payload, dict) and payload.get("draft") is not None:
+                    outgoing = build_result_messages(
+                        payload,
+                        viewer_user_id=user_id,
+                        viewer_role=role,
+                    )
+                    chat_memory.save_user_memory(
+                        user_id,
+                        topic,
+                        shorten_for_memory([m.text for m in outgoing]),
+                    )
+                    await _answer_chunks(message, outgoing)
+                    return
+            except json.JSONDecodeError:
+                pass
+            chat_memory.save_user_memory(user_id, topic, raw)
+            parts = chunk_text(f"✅ Фоновая задача завершена:\n\n{raw}")
             await _answer_chunks(message, parts, parse_mode=None)
             return
         if status == "failed":
@@ -191,8 +218,9 @@ async def _poll_task_and_send_result(
 async def _run_research_flow(message: Message, topic: str) -> None:
     if not topic.strip():
         await message.answer(
-            "Укажи тему после команды.\nПример: `/research агенты в поддержке клиентов`",
-            parse_mode=ParseMode.MARKDOWN,
+            "Укажи тему после команды.\n"
+            "Пример: <code>/research агенты в поддержке клиентов</code>",
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -211,8 +239,8 @@ async def _run_research_flow(message: Message, topic: str) -> None:
             logger.exception("Failed to enqueue heavy research task")
         if task_id:
             await message.answer(
-                f"Задача принята, обрабатываю ⏳\nID: `{task_id}`",
-                parse_mode=ParseMode.MARKDOWN,
+                f"Задача принята, обрабатываю ⏳\nID: <code>{task_id}</code>",
+                parse_mode=ParseMode.HTML,
             )
             asyncio.create_task(
                 _poll_task_and_send_result(
@@ -247,13 +275,18 @@ async def _run_research_flow(message: Message, topic: str) -> None:
             result.get("llm_completion_tokens", 0),
             cost_usd=float(result.get("estimated_cost_usd", 0.0) or 0.0),
         )
-        parts = build_result_message_parts(result)
+        role = get_role(user_id)
+        outgoing = build_result_messages(
+            dict(result),
+            viewer_user_id=user_id,
+            viewer_role=role,
+        )
         chat_memory.save_user_memory(
             user_id,
             topic.strip(),
-            shorten_for_memory(parts),
+            shorten_for_memory([m.text for m in outgoing]),
         )
-        await _answer_chunks(message, parts)
+        await _answer_chunks(message, outgoing)
     except Exception as exc:
         elapsed = time.perf_counter() - started_at
         agent_requests_failed_total.inc()

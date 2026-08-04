@@ -29,9 +29,10 @@ docker compose up -d --build
 
 ## Возможности
 
-- **Multi-agent reasoning**: Web Search → Researcher → Writer → Reviewer (structured JSON scores).
-- **Tavily web search**: актуальные источники; блок `### Источники` обязателен, если поиск успешен.
-- **LLM cost control**: `LLM_PROVIDER=openai|deepseek`, оценка токенов/стоимости в Prometheus.
+- **Multi-agent reasoning**: Web Search → Researcher → Summary → Writer → Reviewer (structured JSON scores).
+- **Product Telegram UX**: HTML-ответы без сырых `#`-заголовков; порядок Draft → Research summary → Sources.
+- **Tavily web search**: источники как нумерованный список + inline-кнопки (title → url).
+- **LLM cost control**: `LLM_PROVIDER=openai|deepseek`, оценка токенов/стоимости в Prometheus (футер только admin/owner).
 - **Conversation memory**: SQLite с `WAL` + `busy_timeout` для параллельной записи bot/worker/admin.
 - **Background worker**: тяжёлые запросы уходят в ARQ вместе с `conversation_history`.
 - **Self-diagnostics**: health-check + monitor-agent (включается флагом `self_diagnostics`).
@@ -45,11 +46,13 @@ flowchart LR
     A --> G[LangGraph Pipeline]
     G --> W[Web Search Node<br/>Tavily + TG parser]
     W --> R[Researcher Node]
-    R --> WR[Writer Node]
+    R --> S[Research Summary<br/>3-5 bullets ≤800]
+    S --> WR[Writer Node]
     WR --> RV[Reviewer Node<br/>JSON scores]
     RV -->|revise| WR
-    RV -->|approve| OUT[Final Response + Sources]
+    RV -->|approve| OUT[HTML UX<br/>Draft → Summary → Sources]
     R --> LLM[LLM Provider<br/>OpenAI/DeepSeek]
+    S --> LLM
     WR --> LLM
     RV --> LLM
     A --> DB[(SQLite WAL Memory)]
@@ -59,6 +62,20 @@ flowchart LR
     P --> GF[Grafana :3001]
     A --> ADM[Web Admin Panel :8004]
 ```
+
+## Продуктовый формат ответов
+
+Порядок сообщений в Telegram:
+
+1. **📝 Ответ** (draft) — HTML, без markdown-решёток и без вшитых ссылок.
+2. **🔬 Кратко по исследованию** — компактное саммари 3–5 пунктов из графа (`research_summary`, бюджет ≤800 символов, без обрезки слов).
+3. **🔗 Источники** — нумерованный список названий + **inline-кнопки** с url.
+
+Дополнительно:
+
+- Чанкинг режет только по абзацам/предложениям; при переносе добавляется пометка «продолжение ниже».
+- Технический футер (`итерации / tokens / cost`) виден только ролям **admin** и **owner** (RBAC).
+- Пользовательский и LLM-текст экранируется через `html.escape` под `ParseMode.HTML`.
 
 ## Команды Telegram
 
@@ -158,7 +175,7 @@ python -m telegram_bot.main
 
 ### Операционные заметки
 
-- **Лимит Telegram 4096:** финальный ответ режется на чанки ≤3800 символов; сначала уходит Draft (+ источники), затем краткий Research.
+- **Лимит Telegram 4096:** ответ уходит продуктовыми секциями (Draft → Summary → Sources), чанки ≤3500 по границам предложений.
 - **Tavily:** нужен *валидный* `TAVILY_API_KEY`. Невалидный ключ даёт soft-fail поиска и честное предупреждение пользователю; секреты в git не коммитятся (только серверный `.env`).
 - **LLM fallback:** при 401/402/403 или `Insufficient Balance` бот автоматически пробует второй провайдер (OpenAI ↔ DeepSeek), пишет лог и инкрементирует `agent_llm_fallback_total`.
 

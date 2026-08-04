@@ -33,6 +33,15 @@ def test_good_topic_approves_without_revision() -> None:
     assert result["feedback"] == ""
     assert result["revision_count"] == 0
     assert "отлично" not in result["draft"].lower()
+    assert result["research_summary"]
+    assert len(result["research_summary"]) <= 800
+    assert "1." in result["research_summary"]
+
+
+def test_initial_state_has_research_summary_field() -> None:
+    state = build_initial_multi_agent_state(topic="x", user_id=1, use_llm=False)
+    assert state["research_summary"] == ""
+    assert state["web_sources"] == []
 
 
 def test_ensure_sources_block_appends_missing_urls() -> None:

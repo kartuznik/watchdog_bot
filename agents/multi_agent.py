@@ -1,10 +1,11 @@
-"""Multi-agent LangGraph pipeline: WebSearch -> Researcher -> Writer -> Reviewer."""
+"""Multi-agent LangGraph pipeline: WebSearch -> Researcher -> Summary -> Writer -> Reviewer."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Literal, TypedDict, cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -13,7 +14,7 @@ from langgraph.graph import END, START, StateGraph
 from agents.llm_config import LLMConfig
 from agents.metrics import observe_llm_fallback
 from agents.tg_parser import extract_telegram_usernames, fetch_many_channels_async
-from agents.web_search import WebSearchTool
+from agents.web_search import SourceItem, WebSearchTool, normalize_source_items
 from config import is_module_enabled
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 RouteLabel = Literal["writer_node", "__end__"]
 MAX_REVISIONS = 2
 APPROVE_SCORE_THRESHOLD = 3.5
+RESEARCH_SUMMARY_BUDGET = 800
 
 
 class HistoryMessage(TypedDict):
@@ -35,7 +37,8 @@ class MultiAgentState(TypedDict):
     topic: str
     conversation_history: list[HistoryMessage]
     research_data: str
-    web_sources: list[str]
+    research_summary: str
+    web_sources: list[SourceItem]
     draft: str
     feedback: str
     revision_count: int
@@ -151,22 +154,39 @@ def _history_as_text(history: list[HistoryMessage], limit: int = 8) -> str:
     return "\n".join(lines).strip() or "История пуста."
 
 
-def _source_lines(web_sources: list[str], limit: int = 5) -> list[str]:
-    return [f"Источник: [{url}]" for url in web_sources[:limit] if str(url).strip()]
+def fit_text_budget(text: str, budget: int = RESEARCH_SUMMARY_BUDGET) -> str:
+    """Trim text to budget on sentence/word boundaries — never mid-word."""
+    content = (text or "").strip()
+    if len(content) <= budget:
+        return content
+    window = content[:budget]
+    end = -1
+    for match in re.finditer(r"[.!?…](?:\s|$)", window):
+        end = match.end()
+    if end >= budget // 3:
+        return window[:end].rstrip()
+    space = window.rfind(" ")
+    if space >= budget // 3:
+        return window[:space].rstrip() + "…"
+    return window.rstrip() + "…"
 
 
-def ensure_sources_block(draft: str, web_sources: list[str]) -> str:
-    """Attach a mandatory sources block when web search returned URLs."""
-    lines = _source_lines(web_sources)
-    if not lines:
+def _source_context_lines(web_sources: list[SourceItem], limit: int = 5) -> list[str]:
+    lines: list[str] = []
+    for item in normalize_source_items(web_sources)[:limit]:
+        lines.append(f"- {item['title']}: {item['url']}")
+    return lines
+
+
+def ensure_sources_block(draft: str, web_sources: list[Any]) -> str:
+    """Legacy helper kept for compatibility; presentation layer no longer embeds sources."""
+    items = normalize_source_items(web_sources)
+    if not items:
         return draft
-    missing = [url for url in web_sources[:5] if url and url not in draft]
-    if not missing and "Источник:" in draft:
+    if any(item["url"] in draft for item in items[:5]) and "Источник" in draft:
         return draft
-    block = "\n\n### Источники\n" + "\n".join(lines)
-    if "### Источники" in draft:
-        return draft
-    return draft.rstrip() + block
+    lines = [f"Источник: [{item['url']}]" for item in items[:5]]
+    return draft.rstrip() + "\n\n### Источники\n" + "\n".join(lines)
 
 
 def _token_cost_update(
@@ -192,6 +212,17 @@ def _mock_research(state: MultiAgentState) -> dict[str, str]:
     }
 
 
+def _mock_research_summary(state: MultiAgentState) -> dict[str, str]:
+    topic = state["topic"]
+    summary = (
+        f"1. По теме «{topic}» собраны ключевые факты и определения.\n"
+        f"2. Отмечены основные риски, ограничения и спорные моменты.\n"
+        f"3. Сформулированы практические выводы для читателя.\n"
+        f"4. При наличии источников они вынесены отдельным блоком."
+    )
+    return {"research_summary": fit_text_budget(summary, RESEARCH_SUMMARY_BUDGET)}
+
+
 def _mock_writer(state: MultiAgentState) -> dict[str, str]:
     topic = state["topic"]
     research_data = state["research_data"]
@@ -212,7 +243,7 @@ def _mock_writer(state: MultiAgentState) -> dict[str, str]:
             f"Готовый материал по теме '{topic}': {research_data}. "
             "Структура ясная, выводы сформулированы."
         )
-    return {"draft": ensure_sources_block(draft, state["web_sources"])}
+    return {"draft": draft}
 
 
 def _mock_review(state: MultiAgentState) -> dict[str, str | int]:
@@ -243,7 +274,7 @@ async def web_search_node(state: MultiAgentState) -> dict[str, Any]:
         }
 
     tavily_text = ""
-    tavily_sources: list[str] = []
+    tavily_sources: list[SourceItem] = []
     try:
         web_tool = WebSearchTool()
         tavily_text, tavily_sources = await asyncio.to_thread(
@@ -260,7 +291,7 @@ async def web_search_node(state: MultiAgentState) -> dict[str, Any]:
     tg_posts = await fetch_many_channels_async(usernames, per_channel=2) if usernames else []
 
     blocks: list[str] = []
-    sources: list[str] = list(tavily_sources)
+    sources: list[SourceItem] = list(tavily_sources)
     if tavily_text.strip():
         blocks.append("Веб-результаты (Tavily):\n" + tavily_text.strip())
     else:
@@ -273,18 +304,17 @@ async def web_search_node(state: MultiAgentState) -> dict[str, Any]:
             url = str(post.get("url", "")).strip()
             content = str(post.get("content", "")).strip()
             if url:
-                sources.append(url)
-                lines.append(f"- {title}\n  Источник: [{url}]\n  {content[:220]}")
+                sources.append({"title": title or url, "url": url})
+                lines.append(f"- {title}\n  URL: {url}\n  {content[:220]}")
             else:
                 lines.append(f"- {title}\n  {content[:220]}")
         blocks.append("Публичные Telegram-каналы:\n" + "\n".join(lines))
 
     if not blocks:
         blocks.append("Внешние источники не найдены, используй базовые знания модели.")
-    deduplicated_sources = list(dict.fromkeys([s for s in sources if s.strip()]))
     return {
         "research_data": "\n\n".join(blocks),
-        "web_sources": deduplicated_sources,
+        "web_sources": normalize_source_items(sources),
     }
 
 
@@ -316,13 +346,47 @@ async def research_node(state: MultiAgentState) -> dict[str, str | int | float]:
     return update
 
 
+async def research_summary_node(state: MultiAgentState) -> dict[str, str | int | float]:
+    """Compact 3–5 bullet research summary for Telegram presentation (≤800 chars)."""
+    if not state["use_llm"]:
+        return _mock_research_summary(state)
+
+    user_prompt = (
+        f"Тема: {state['topic']}\n\n"
+        f"Полное исследование:\n{state['research_data']}\n\n"
+        "Сделай компактное саммари из 3-5 нумерованных пунктов на русском. "
+        f"Жёсткий бюджет: не больше {RESEARCH_SUMMARY_BUDGET} символов. "
+        "Не обрывай слова. Без markdown-заголовков и без ссылок."
+    )
+    result = await _invoke_llm(
+        system_prompt=(
+            "Ты редактор-суммаризатор. Пиши только нумерованный список 3-5 пунктов. "
+            "Каждый пункт — одно законченное предложение."
+        ),
+        user_prompt=user_prompt,
+        temperature=0,
+    )
+    if result is None:
+        return _mock_research_summary(state)
+    text, prompt_tokens, completion_tokens = result
+    summary = fit_text_budget(text or "", RESEARCH_SUMMARY_BUDGET)
+    if not summary:
+        return {
+            **_mock_research_summary(state),
+            **_token_cost_update(state, prompt_tokens, completion_tokens),
+        }
+    update = _token_cost_update(state, prompt_tokens, completion_tokens)
+    update["research_summary"] = summary
+    return update
+
+
 async def writer_node(state: MultiAgentState) -> dict[str, str | int | float]:
     """Writer node: draft content from research + reviewer feedback."""
     if not state["use_llm"]:
         return _mock_writer(state)
 
     feedback = state["feedback"].strip() or "Нет обратной связи."
-    source_lines = _source_lines(state["web_sources"])
+    source_lines = _source_context_lines(state["web_sources"])
     sources_context = (
         "Список подтвержденных источников:\n" + "\n".join(source_lines)
         if source_lines
@@ -333,10 +397,10 @@ async def writer_node(state: MultiAgentState) -> dict[str, str | int | float]:
         f"Исследование:\n{state['research_data']}\n\n"
         f"{sources_context}\n\n"
         f"Обратная связь ревьюера: {feedback}\n\n"
-        "Напиши финальный черновик в 3-5 абзацах. "
+        "Напиши финальный ответ в 3-5 коротких абзацах. "
         "Если это исправленная версия, явно улучши структуру и ясность. "
-        "Если есть источники, обязательно добавь блок с каждой строкой в формате "
-        "'Источник: [url]'."
+        "НЕ добавляй список источников и НЕ используй markdown-заголовки с # — "
+        "источники уйдут отдельным сообщением."
     )
     result = await _invoke_llm(
         system_prompt=(
@@ -352,10 +416,7 @@ async def writer_node(state: MultiAgentState) -> dict[str, str | int | float]:
     if result is None:
         return _mock_writer(state)
     text, prompt_tokens, completion_tokens = result
-    draft = ensure_sources_block(
-        text or _mock_writer(state)["draft"],
-        state["web_sources"],
-    )
+    draft = (text or _mock_writer(state)["draft"]).strip()
     update = _token_cost_update(state, prompt_tokens, completion_tokens)
     update["draft"] = draft
     return update
@@ -383,7 +444,6 @@ def parse_reviewer_payload(raw: str) -> tuple[str, dict[str, float], str]:
 
     decision_raw = str(parsed.get("decision", "")).strip().lower()
     if decision_raw not in {"approve", "revise"}:
-        # Backward-compatible with older {"approved": bool} payloads.
         if "approved" in parsed:
             decision_raw = "approve" if bool(parsed.get("approved")) else "revise"
         else:
@@ -463,7 +523,6 @@ async def reviewer_node(state: MultiAgentState) -> dict[str, str | int | float]:
         update["revision_count"] = revision_count + 1
         return update
 
-    # Hit revision cap — accept current draft.
     update["feedback"] = ""
     return update
 
@@ -477,17 +536,19 @@ def route_after_review(state: MultiAgentState) -> RouteLabel:
 
 
 def build_multi_agent_graph():
-    """Build and compile WebSearch -> Researcher -> Writer -> Reviewer graph."""
+    """Build WebSearch -> Researcher -> Summary -> Writer -> Reviewer graph."""
     graph = StateGraph(MultiAgentState)
 
     graph.add_node("web_search_node", web_search_node)
     graph.add_node("research_node", research_node)
+    graph.add_node("research_summary_node", research_summary_node)
     graph.add_node("writer_node", writer_node)
     graph.add_node("reviewer_node", reviewer_node)
 
     graph.add_edge(START, "web_search_node")
     graph.add_edge("web_search_node", "research_node")
-    graph.add_edge("research_node", "writer_node")
+    graph.add_edge("research_node", "research_summary_node")
+    graph.add_edge("research_summary_node", "writer_node")
     graph.add_edge("writer_node", "reviewer_node")
     graph.add_conditional_edges(
         "reviewer_node",
@@ -510,6 +571,7 @@ def build_initial_multi_agent_state(
         "topic": topic,
         "conversation_history": list(conversation_history or []),
         "research_data": "",
+        "research_summary": "",
         "web_sources": [],
         "draft": "",
         "feedback": "",

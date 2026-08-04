@@ -1,16 +1,41 @@
-"""Tavily web search adapter inspired by telegram-ai-bot search_with_tavily."""
+"""Tavily web search adapter for Watchdog Bot."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from typing import Any
+from typing import Any, TypedDict
 
 from tavily import TavilyClient
 from tavily.errors import TimeoutError as TavilyTimeoutError
 
 logger = logging.getLogger(__name__)
+
+
+class SourceItem(TypedDict):
+    title: str
+    url: str
+
+
+def normalize_source_items(raw: list[Any] | None) -> list[SourceItem]:
+    """Normalize URL strings or {title,url} dicts into SourceItem list."""
+    items: list[SourceItem] = []
+    seen: set[str] = set()
+    for entry in raw or []:
+        title = ""
+        url = ""
+        if isinstance(entry, str):
+            url = entry.strip()
+            title = url
+        elif isinstance(entry, dict):
+            url = str(entry.get("url", "")).strip()
+            title = str(entry.get("title") or url).strip() or url
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        items.append({"title": title[:120], "url": url})
+    return items
 
 
 class WebSearchTool:
@@ -23,36 +48,27 @@ class WebSearchTool:
         self.client = TavilyClient(api_key=api_key)
 
     def search(self, query: str, max_results: int = 3) -> str:
-        response = self.client.search(query=query, max_results=max_results, timeout=25)
-        results: list[str] = []
-        for item in response.get("results", []):
-            if not isinstance(item, dict):
-                continue
-            url = str(item.get("url", "")).strip()
-            content = str(item.get("content", "")).strip().replace("\n", " ")
-            if not url and not content:
-                continue
-            if url:
-                results.append(f"Источник: [{url}]\nКонтент: {content}")
-            else:
-                results.append(f"Контент: {content}")
-        return "\n\n".join(results)
+        text, _sources = self.search_with_sources(query, max_results=max_results)
+        return text
 
-    def search_with_sources(self, query: str, max_results: int = 3) -> tuple[str, list[str]]:
+    def search_with_sources(
+        self, query: str, max_results: int = 3
+    ) -> tuple[str, list[SourceItem]]:
         response = self.client.search(query=query, max_results=max_results, timeout=25)
         lines: list[str] = []
-        sources: list[str] = []
+        sources: list[SourceItem] = []
         for item in response.get("results", []):
             if not isinstance(item, dict):
                 continue
             url = str(item.get("url", "")).strip()
+            title = str(item.get("title") or url or "Без названия").strip()
             content = str(item.get("content", "")).strip().replace("\n", " ")
             if url:
-                sources.append(url)
-                lines.append(f"Источник: [{url}]\nКонтент: {content}")
+                sources.append({"title": title[:120], "url": url})
+                lines.append(f"{title}\nURL: {url}\nКонтент: {content}")
             elif content:
                 lines.append(f"Контент: {content}")
-        return "\n\n".join(lines), sources
+        return "\n\n".join(lines), normalize_source_items(sources)
 
 
 class TavilyWebSearch:
