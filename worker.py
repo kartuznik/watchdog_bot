@@ -1,15 +1,21 @@
-"""ARQ worker for heavy research and web-search tasks."""
+"""ARQ worker for heavy research tasks."""
 
 from __future__ import annotations
 
 import os
+from typing import Any
 from urllib.parse import urlparse
 
 from arq.connections import RedisSettings
 
 from agents.database import init_db, update_async_task_status
-from agents.multi_agent import build_initial_multi_agent_state, build_multi_agent_graph
-from agents.web_search import TavilyWebSearch, format_search_results
+from agents.metrics import observe_token_usage
+from agents.multi_agent import (
+    HistoryMessage,
+    build_initial_multi_agent_state,
+    build_multi_agent_graph,
+    ensure_sources_block,
+)
 
 
 def _redis_settings_from_env() -> RedisSettings:
@@ -22,25 +28,50 @@ def _redis_settings_from_env() -> RedisSettings:
     return RedisSettings(host=host, port=port, database=database, password=password)
 
 
+def _normalize_history(raw: Any) -> list[HistoryMessage]:
+    if not isinstance(raw, list):
+        return []
+    history: list[HistoryMessage] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).strip()
+        content = str(item.get("content", "")).strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        history.append({"role": role, "content": content})
+    return history
+
+
 async def process_research_task(
     _ctx: dict,
     topic: str,
     user_id: int,
     task_id: str,
+    conversation_history: list[dict[str, str]] | None = None,
 ) -> str:
     update_async_task_status(task_id, status="running")
     graph = build_multi_agent_graph()
+    history = _normalize_history(conversation_history)
     initial_state = build_initial_multi_agent_state(
         topic=topic,
         user_id=user_id,
-        conversation_history=[],
+        conversation_history=history,
         use_llm=True,
     )
     try:
         result = await graph.ainvoke(initial_state)
-        draft = str(result.get("draft", "")).strip()
+        draft = ensure_sources_block(
+            str(result.get("draft", "")).strip(),
+            list(result.get("web_sources") or []),
+        )
         if not draft:
             draft = "Пустой результат от research worker."
+        observe_token_usage(
+            int(result.get("llm_prompt_tokens", 0) or 0),
+            int(result.get("llm_completion_tokens", 0) or 0),
+            cost_usd=float(result.get("estimated_cost_usd", 0.0) or 0.0),
+        )
         update_async_task_status(task_id, status="done", result=draft)
         return draft
     except Exception as exc:
@@ -48,38 +79,12 @@ async def process_research_task(
         raise
 
 
-async def process_web_search_task(
-    _ctx: dict,
-    query: str,
-    user_id: int,
-    task_id: str,
-) -> str:
-    del user_id  # reserved for future per-user quotas/rate limits.
-    update_async_task_status(task_id, status="running")
-    try:
-        client = TavilyWebSearch()
-        items = await client.search(query, max_results=5)
-        if not items:
-            text = "Веб-поиск не дал результатов."
-        else:
-            text = format_search_results(items)
-        update_async_task_status(task_id, status="done", result=text)
-        return text
-    except Exception as exc:
-        update_async_task_status(task_id, status="failed", error=str(exc))
-        raise
-
-
-async def health_check(_ctx: dict) -> str:
-    return "ok"
-
-
 async def startup(_ctx: dict) -> None:
     init_db()
 
 
 class WorkerSettings:
-    functions = [process_research_task, process_web_search_task]
+    functions = [process_research_task]
     redis_settings = _redis_settings_from_env()
     max_jobs = 10
     job_timeout = 600

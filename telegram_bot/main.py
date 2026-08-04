@@ -60,7 +60,7 @@ async def main() -> None:
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not bot_token:
         raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN is not set. Add it to ai-agents-lab/.env."
+            "TELEGRAM_BOT_TOKEN is not set. Add it to .env."
         )
 
     bot = Bot(

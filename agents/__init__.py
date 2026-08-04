@@ -1,1 +1,1 @@
-"""Agent package for LangGraph training lab."""
+"""Watchdog Bot agent package (LangGraph multi-agent pipeline)."""

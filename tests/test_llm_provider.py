@@ -1,4 +1,4 @@
-"""Tests for configurable LLM providers (OpenAI/DeepSeek)."""
+"""Tests for configurable LLM providers (OpenAI/DeepSeek) and cost estimates."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import pytest
 from openai import APIStatusError
 
 from agents.llm_config import LLMConfig
+from config import is_module_enabled
 
 
 def test_get_provider_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -40,6 +41,36 @@ def test_llm_config_works_without_api_key(monkeypatch: pytest.MonkeyPatch) -> No
         LLMConfig.create_chat_model(temperature=0)
 
     assert "OPENAI_API_KEY" in str(error.value)
+    assert "ai-agents-lab" not in str(error.value)
+
+
+def test_estimate_cost_usd_openai_mini(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_NAME", "gpt-4o-mini")
+    # 1M prompt @ $0.15 + 1M completion @ $0.60 = $0.75
+    cost = LLMConfig.estimate_cost_usd(1_000_000, 1_000_000)
+    assert abs(cost - 0.75) < 1e-9
+
+
+def test_estimate_cost_usd_deepseek(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("MODEL_NAME", "deepseek-chat")
+    cost = LLMConfig.estimate_cost_usd(1_000_000, 0)
+    assert abs(cost - 0.14) < 1e-9
+
+
+def test_feature_flags_default_three_modules(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ENABLED_MODULES", raising=False)
+    assert is_module_enabled("self_diagnostics")
+    assert is_module_enabled("background_worker")
+    assert is_module_enabled("web_search")
+    assert not is_module_enabled("multi_agent")
+
+
+def test_feature_flags_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLED_MODULES", "web_search")
+    assert is_module_enabled("web_search")
+    assert not is_module_enabled("background_worker")
 
 
 @pytest.mark.skipif(

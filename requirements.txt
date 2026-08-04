@@ -3,7 +3,7 @@ langchain-openai
 langchain-core
 python-dotenv
 aiogram>=3.0.0
-tavily-python
+tavily-python>=0.3.0
 fastapi
 uvicorn
 prometheus-client

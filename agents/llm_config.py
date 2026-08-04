@@ -12,6 +12,16 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Approximate USD prices per 1M tokens: (input, output).
+# Used for Prometheus cost estimation — not billing-grade.
+_PRICE_PER_1M: dict[tuple[str, str], tuple[float, float]] = {
+    ("openai", "gpt-4o-mini"): (0.15, 0.60),
+    ("openai", "gpt-4o"): (2.50, 10.00),
+    ("deepseek", "deepseek-chat"): (0.14, 0.28),
+    ("deepseek", "deepseek-reasoner"): (0.55, 2.19),
+}
+_DEFAULT_PRICE_PER_1M = (0.15, 0.60)
+
 
 class LLMConfig:
     """Resolve provider-specific credentials and create chat models."""
@@ -33,7 +43,7 @@ class LLMConfig:
         if provider not in {cls.OPENAI_PROVIDER, cls.DEEPSEEK_PROVIDER}:
             raise ValueError(
                 "Unsupported LLM_PROVIDER. Use 'openai' or 'deepseek'. "
-                "Check ai-agents-lab/.env.example for valid values."
+                "See .env.example for valid values."
             )
         return provider
 
@@ -48,10 +58,10 @@ class LLMConfig:
         api_key = os.getenv(key_name, "").strip()
         if not api_key:
             provider_hint = (
-                "Set OPENAI_API_KEY in ai-agents-lab/.env."
+                "Set OPENAI_API_KEY in .env."
                 if provider == cls.OPENAI_PROVIDER
                 else (
-                    "Set DEEPSEEK_API_KEY in ai-agents-lab/.env "
+                    "Set DEEPSEEK_API_KEY in .env "
                     "(get one at https://platform.deepseek.com)."
                 )
             )
@@ -74,6 +84,26 @@ class LLMConfig:
             return model_name
         provider = cls.get_provider()
         return cls.DEFAULT_MODEL_BY_PROVIDER[provider]
+
+    @classmethod
+    def estimate_cost_usd(
+        cls,
+        prompt_tokens: int,
+        completion_tokens: int,
+        *,
+        provider: str | None = None,
+        model_name: str | None = None,
+    ) -> float:
+        """Estimate USD cost from token counts for the active (or given) provider/model."""
+        resolved_provider = (provider or cls.get_provider()).strip().lower()
+        resolved_model = (model_name or cls.get_model_name()).strip().lower()
+        input_price, output_price = _PRICE_PER_1M.get(
+            (resolved_provider, resolved_model),
+            _DEFAULT_PRICE_PER_1M,
+        )
+        prompt = max(0, int(prompt_tokens))
+        completion = max(0, int(completion_tokens))
+        return (prompt * input_price + completion * output_price) / 1_000_000.0
 
     @classmethod
     def create_chat_model(cls, temperature: float = 0) -> ChatOpenAI:

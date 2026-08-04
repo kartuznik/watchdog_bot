@@ -1,1 +1,1 @@
-"""Telegram bot package for week 3 integration."""
+"""Watchdog Bot Telegram package (aiogram 3)."""

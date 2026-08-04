@@ -104,11 +104,19 @@ class HealthCheckService:
 
     def _check_db_ping(self) -> bool:
         try:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                conn.execute("SELECT 1").fetchone()
-            finally:
-                conn.close()
+            # Prefer shared helper (WAL/busy_timeout); fall back only if path differs.
+            from agents.database import DB_PATH, get_connection
+
+            if Path(self.db_path).resolve() == Path(DB_PATH).resolve():
+                with get_connection() as conn:
+                    conn.execute("SELECT 1").fetchone()
+            else:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                try:
+                    conn.execute("PRAGMA busy_timeout=30000")
+                    conn.execute("SELECT 1").fetchone()
+                finally:
+                    conn.close()
             return True
         except Exception:
             logger.exception("DB ping failed for path=%s", self.db_path)

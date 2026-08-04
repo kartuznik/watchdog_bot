@@ -1,1 +1,1 @@
-"""Admin panel package for ai-agents-lab."""
+"""Watchdog Bot FastAPI admin panel."""

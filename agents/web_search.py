@@ -13,6 +13,48 @@ from tavily.errors import TimeoutError as TavilyTimeoutError
 logger = logging.getLogger(__name__)
 
 
+class WebSearchTool:
+    """Synchronous Tavily search tool for graph nodes and workers."""
+
+    def __init__(self) -> None:
+        api_key = os.getenv("TAVILY_API_KEY", "").strip()
+        if not api_key:
+            raise ValueError("TAVILY_API_KEY not found in environment")
+        self.client = TavilyClient(api_key=api_key)
+
+    def search(self, query: str, max_results: int = 3) -> str:
+        response = self.client.search(query=query, max_results=max_results, timeout=25)
+        results: list[str] = []
+        for item in response.get("results", []):
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url", "")).strip()
+            content = str(item.get("content", "")).strip().replace("\n", " ")
+            if not url and not content:
+                continue
+            if url:
+                results.append(f"Источник: [{url}]\nКонтент: {content}")
+            else:
+                results.append(f"Контент: {content}")
+        return "\n\n".join(results)
+
+    def search_with_sources(self, query: str, max_results: int = 3) -> tuple[str, list[str]]:
+        response = self.client.search(query=query, max_results=max_results, timeout=25)
+        lines: list[str] = []
+        sources: list[str] = []
+        for item in response.get("results", []):
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url", "")).strip()
+            content = str(item.get("content", "")).strip().replace("\n", " ")
+            if url:
+                sources.append(url)
+                lines.append(f"Источник: [{url}]\nКонтент: {content}")
+            elif content:
+                lines.append(f"Контент: {content}")
+        return "\n\n".join(lines), sources
+
+
 class TavilyWebSearch:
     def __init__(self) -> None:
         api_key = os.getenv("TAVILY_API_KEY", "").strip()

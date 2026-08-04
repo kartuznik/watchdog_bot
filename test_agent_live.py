@@ -44,7 +44,7 @@ def main() -> None:
         print("Draft:", str(result["draft"])[:400])
     except ValueError as exc:
         print("Configuration error:", exc)
-        print("Hint: set OPENAI_API_KEY in ai-agents-lab/.env")
+        print("Hint: set OPENAI_API_KEY (or DEEPSEEK_API_KEY) in .env")
     except APIStatusError as exc:
         status_code = getattr(exc, "status_code", None)
         if status_code == 402:

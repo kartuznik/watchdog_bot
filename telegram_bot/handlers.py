@@ -37,6 +37,7 @@ from agents.multi_agent import (
     MultiAgentState,
     build_initial_multi_agent_state,
     build_multi_agent_graph,
+    ensure_sources_block,
 )
 from agents.memory import ChatMemory
 from agents.metrics import (
@@ -46,6 +47,7 @@ from agents.metrics import (
     observe_token_usage,
 )
 from agents.roles import get_role, list_admins, remove_role, set_role
+from config import is_module_enabled
 from telegram_bot.middlewares.role_check import require_role
 
 logger = logging.getLogger(__name__)
@@ -70,7 +72,11 @@ def set_last_monitor_state(state: MonitorAgentState) -> None:
 def _format_result_markdown(result: MultiAgentState) -> str:
     topic = result["topic"]
     research_data = result["research_data"]
-    draft = result["draft"]
+    draft = ensure_sources_block(result["draft"], list(result.get("web_sources") or []))
+    cost = float(result.get("estimated_cost_usd", 0.0) or 0.0)
+    tokens = int(result.get("llm_prompt_tokens", 0) or 0) + int(
+        result.get("llm_completion_tokens", 0) or 0
+    )
     return (
         "## ✅ Готово\n"
         f"**Тема:** {topic}\n\n"
@@ -78,7 +84,8 @@ def _format_result_markdown(result: MultiAgentState) -> str:
         f"{research_data}\n\n"
         "### 📝 Draft\n"
         f"{draft}\n\n"
-        f"_Итераций ревью: {result['revision_count']}_"
+        f"_Итераций ревью: {result['revision_count']} · "
+        f"tokens≈{tokens} · cost≈${cost:.6f}_"
     )
 
 
@@ -110,13 +117,18 @@ def _is_heavy_request(topic: str) -> bool:
     return any(marker in normalized for marker in heavy_markers)
 
 
-async def _enqueue_research_task(topic: str, user_id: int) -> str | None:
+async def _enqueue_research_task(
+    topic: str,
+    user_id: int,
+    conversation_history: list[dict[str, str]] | None = None,
+) -> str | None:
     if create_pool is None:
         return None
     redis_settings = _redis_settings_from_env()
     if redis_settings is None:
         return None
 
+    history = list(conversation_history or [])
     task_id = str(uuid.uuid4())
     create_async_task(
         task_id=task_id,
@@ -126,7 +138,14 @@ async def _enqueue_research_task(topic: str, user_id: int) -> str | None:
     )
     redis = await create_pool(redis_settings)
     try:
-        await redis.enqueue_job("process_research_task", topic, user_id, task_id, _job_id=task_id)
+        await redis.enqueue_job(
+            "process_research_task",
+            topic,
+            user_id,
+            task_id,
+            history,
+            _job_id=task_id,
+        )
     except Exception as exc:
         update_async_task_status(task_id, status="failed", error=str(exc))
         raise
@@ -173,9 +192,15 @@ async def _run_research_flow(message: Message, topic: str) -> None:
         return
 
     user_id = message.from_user.id if message.from_user else 0
-    if _is_heavy_request(topic):
+    conversation_history = chat_memory.get_user_memory(user_id)
+
+    if is_module_enabled("background_worker") and _is_heavy_request(topic):
         try:
-            task_id = await _enqueue_research_task(topic.strip(), user_id)
+            task_id = await _enqueue_research_task(
+                topic.strip(),
+                user_id,
+                conversation_history,
+            )
         except Exception:
             task_id = None
             logger.exception("Failed to enqueue heavy research task")
@@ -194,7 +219,6 @@ async def _run_research_flow(message: Message, topic: str) -> None:
             )
             return
 
-    conversation_history = chat_memory.get_user_memory(user_id)
     initial_state = build_initial_multi_agent_state(
         topic=topic.strip(),
         user_id=user_id,
@@ -216,8 +240,13 @@ async def _run_research_flow(message: Message, topic: str) -> None:
         observe_token_usage(
             result.get("llm_prompt_tokens", 0),
             result.get("llm_completion_tokens", 0),
+            cost_usd=float(result.get("estimated_cost_usd", 0.0) or 0.0),
         )
-        chat_memory.save_user_memory(user_id, topic.strip(), result["draft"])
+        draft = ensure_sources_block(
+            result["draft"],
+            list(result.get("web_sources") or []),
+        )
+        chat_memory.save_user_memory(user_id, topic.strip(), draft)
         await message.answer(
             _format_result_markdown(result),
             parse_mode=ParseMode.MARKDOWN,

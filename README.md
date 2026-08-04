@@ -1,225 +1,193 @@
-# Watchdog — AI Multi-Agent Assistant
+# Watchdog Bot
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)]()
-[![LangGraph](https://img.shields.io/badge/langgraph-latest-green.svg)]()
-[![aiogram 3.x](https://img.shields.io/badge/aiogram-3.x-green.svg)]()
-[![Docker ready](https://img.shields.io/badge/docker-ready-blue.svg)]()
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)]()
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![LangGraph](https://img.shields.io/badge/langgraph-latest-green.svg)](https://github.com/langchain-ai/langgraph)
+[![aiogram 3.x](https://img.shields.io/badge/aiogram-3.x-green.svg)](https://docs.aiogram.dev/)
+[![Docker ready](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Автономный Telegram-ассистент, который **думает, прежде чем ответить**.
+**Self-hosted AI assistant with a multi-agent LangGraph pipeline and live web search**
 
-В отличие от обычных чат-ботов, Watchdog использует **multi-agent архитектуру** на базе LangGraph: перед ответом запускается цепочка Researcher → Writer → Reviewer, где каждый агент выполняет свою роль.
+## О проекте
 
-Researcher собирает факты, Writer превращает их в ответ, Reviewer проверяет качество и при необходимости возвращает черновик на доработку. Пользователь получает не «первую мысль модели», а проверенный результат.
+**Watchdog Bot** — portfolio-ready MVP Telegram-ассистента: оркестрация через LangGraph,
+живой веб-поиск (Tavily), переключение LLM OpenAI ↔ DeepSeek, память диалогов на SQLite (WAL),
+фоновые задачи ARQ/Redis, RBAC, Prometheus/Grafana и тонкая FastAPI-админка.
 
----
+Это **не** enterprise B2B-платформа «из коробки». Это честный self-hosted каркас, который
+можно показать в портфолио и развивать дальше (Postgres, tenancy, CI — вне текущего scope).
 
-## Quick Start
-
-Три команды, чтобы бот ожил:
+## Быстрый старт
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt && cp .env.example .env
-python -m telegram_bot.main
+git clone https://github.com/kartuznik/watchdog_bot.git
+cd watchdog_bot
+cp .env.example .env
+# заполните TELEGRAM_BOT_TOKEN, OPENAI_API_KEY (или DeepSeek), OWNER_ID, ADMIN_PASSWORD
+docker compose up -d --build
 ```
 
-Минимум в `.env`: `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, `ADMIN_PASSWORD`.
+## Возможности
 
-Для Docker Compose используй только эти внешние порты:
-- Bot metrics: `8011` (не `8001`)
-- Admin panel: `8004` (не `8003`)
-- Prometheus: `9091` (не `9090`)
-- Grafana: `3001` (не `3000`)
+- **Multi-agent reasoning**: Web Search → Researcher → Writer → Reviewer (structured JSON scores).
+- **Tavily web search**: актуальные источники; блок `### Источники` обязателен, если поиск успешен.
+- **LLM cost control**: `LLM_PROVIDER=openai|deepseek`, оценка токенов/стоимости в Prometheus.
+- **Conversation memory**: SQLite с `WAL` + `busy_timeout` для параллельной записи bot/worker/admin.
+- **Background worker**: тяжёлые запросы уходят в ARQ вместе с `conversation_history`.
+- **Self-diagnostics**: health-check + monitor-agent (включается флагом `self_diagnostics`).
+- **RBAC + observability**: owner/admin/user, metrics `:8011`, Prometheus `:9091`, Grafana `:3001`, admin `:8004`.
 
----
+## Архитектура
 
-## Features
-
-- 🧠 **Multi-agent reasoning:** `WebSearch -> Researcher -> Writer <-> Reviewer`
-- ⚡ **Живой UX:** typing indicator в цикле во время длинных вычислений
-- 🔍 **Интернет-контекст:** Tavily web search + parser публичных Telegram-каналов
-- 🧾 **Память диалога:** SQLite history, контекст между сообщениями
-- 🔖 **Якоря:** быстрые закладки ключевых кусочков диалога
-- 🛡 **Модульная архитектура:** feature flags в `config.py` (`ENABLED_MODULES`)
-- ♻️ **Self-healing:** lightweight watchdog + monitor-agent диагностика
-- 🧵 **Background worker:** ARQ + Redis для тяжелых задач без блокировки бота
-- 📊 **Наблюдаемость:** Prometheus метрики + Grafana dashboards
-- 🛠 **Операционка:** FastAPI web-admin панель для памяти и ролей
-
----
-
-## Architecture
-
-```text
-Telegram User
-    |
-    v
-[aiogram handlers]
-    |
-    +--> [LangGraph pipeline]
-           START
-             |
-             v
-       [web_search_node] ---> [research_node] ---> [writer_node] ---> [reviewer_node]
-                                                             ^               |
-                                                             |               |
-                                                             +---- feedback --+
-                                                                      (loop cap: 2)
-             |
-             +--> LLM provider (OpenAI / DeepSeek via LLMConfig)
-             +--> Conversation memory + anchors (SQLite)
-             +--> Heavy tasks queue (ARQ + Redis worker)
-             +--> Metrics endpoint (:8001)
-                       |
-                       v
-              Prometheus (:9091) ---> Grafana (:3001)
-                       |
-                       +--> Admin panel (:8004)
+```mermaid
+flowchart LR
+    U[Telegram User] --> A[aiogram handlers]
+    A --> G[LangGraph Pipeline]
+    G --> W[Web Search Node<br/>Tavily + TG parser]
+    W --> R[Researcher Node]
+    R --> WR[Writer Node]
+    WR --> RV[Reviewer Node<br/>JSON scores]
+    RV -->|revise| WR
+    RV -->|approve| OUT[Final Response + Sources]
+    R --> LLM[LLM Provider<br/>OpenAI/DeepSeek]
+    WR --> LLM
+    RV --> LLM
+    A --> DB[(SQLite WAL Memory)]
+    A --> Q[(ARQ + Redis)]
+    A --> M[Metrics :8001]
+    M --> P[Prometheus :9091]
+    P --> GF[Grafana :3001]
+    A --> ADM[Web Admin Panel :8004]
 ```
 
-Потоки данных:
-- пользовательский запрос -> `handlers.py` -> `MultiAgentState`;
-- результат графа сохраняется в память и отдаётся пользователю;
-- метрики и служебные события доступны админке/мониторингу.
-
----
-
-## Commands
+## Команды Telegram
 
 | Команда | Назначение | Доступ |
 |---|---|---|
-| `/start` | Приветствие и сценарии использования | `user` |
-| `/research <тема>` | Глубокий multi-agent анализ | `user` |
-| `/clear` | Очистка истории текущего пользователя | `user` |
-| `/me` | Показать текущую роль | `user` |
-| `/selftest` | Проверка состояния ключевых подсистем | `admin` |
-| `/fulldiag` | Полная диагностика через monitor-agent | `admin` |
-| `/status` | Технический статус и health summary | `admin/owner` |
-| `/restart` | Контролируемый перезапуск процесса | `owner` |
-| `/setadmin <id>` | Назначить администратора | `owner` |
-| `/removeadmin <id>` | Снять права администратора | `owner` |
-| `/admins` | Список администраторов | `owner` |
+| `/start` | Приветствие | user |
+| `/research <тема>` | Multi-agent исследование | user |
+| `/clear` | Очистить историю диалога | user |
+| `/me` | Показать свою роль | user |
+| `/selftest` | Быстрая проверка подсистем | admin |
+| `/status` | Техсостояние процесса | admin |
+| `/fulldiag` | Полная диагностика monitor-agent | admin |
+| `/setadmin <user_id>` | Выдать admin | owner |
+| `/removeadmin <user_id>` | Снять admin | owner |
+| `/admins` | Список админов | owner |
+| `/restart` | Перезапуск процесса бота | owner |
 
----
+Обычный текст без `/` также запускает research-flow.
 
-## Environment Variables
+Web-админка доступна по HTTP (`:8004`), отдельной Telegram-команды `/admin` нет.
 
-| Переменная | Обязательность | Что делает |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | **Да** | токен бота от BotFather |
-| `OPENAI_API_KEY` | **Да** (для OpenAI) | ключ OpenAI API |
-| `LLM_PROVIDER` | Нет | `openai` или `deepseek` |
-| `MODEL_NAME` | Нет | модель LLM (по умолчанию `gpt-4o-mini`) |
-| `TAVILY_API_KEY` | Нет | веб-поиск для research-узла |
-| `ADMIN_PASSWORD` | **Да** для admin-panel | пароль basic auth веб-админки |
-| `OWNER_ID` | Нет, но рекомендуется | Telegram user id владельца (owner-role) |
-| `REDIS_URL` | Нет | Redis для очередей и worker |
-| `AGENT_DB_PATH` | Нет | путь к SQLite базе |
-| `METRICS_PORT` | Нет | порт prometheus metrics endpoint |
-| `GRAFANA_ADMIN_PASSWORD` | Нет | пароль админа Grafana |
+## Feature flags
 
----
+Рабочие флаги (код реально проверяет их):
 
-## LLM Providers
+| Flag | Эффект |
+|---|---|
+| `self_diagnostics` | health-check + monitor loop |
+| `background_worker` | enqueue тяжёлых запросов в ARQ |
+| `web_search` | Tavily/TG search node |
 
-| Провайдер | Стоимость | Скорость | Качество | Рекомендация |
-|---|---:|---|---|---|
-| GPT-4o | `$5-10 / 1M` токенов | средняя/высокая | очень высокое | точечный финальный QA |
-| GPT-4o-mini | `$0.15 / 1M` токенов | высокая | хорошее | **дефолт для разработки** |
-| DeepSeek-V3 | `$0.14 / 1M` токенов | высокая | хорошее | массовые тестовые прогоны |
-
----
-
-## Testing
+Задаются списком в `config.py` или переопределяются env:
 
 ```bash
-pytest tests/ -v
-python test_agent_live.py
+ENABLED_MODULES=self_diagnostics,background_worker,web_search
 ```
 
-Практика:
-- unit-тесты гоняем в mock-режиме;
-- live-check (`test_agent_live.py`) запускаем вручную перед релизом.
+Admin panel / Prometheus / Grafana / RBAC всегда доступны через compose и код.
 
----
+## Переменные окружения
 
-## Deployment
+| Переменная | Обязательность | Описание |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | обязательно | токен BotFather |
+| `OWNER_ID` | рекомендуется | Telegram user id владельца |
+| `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | обязательно для выбранного провайдера | ключ LLM |
+| `LLM_PROVIDER` | опционально | `openai` (default) или `deepseek` |
+| `MODEL_NAME` | опционально | например `gpt-4o-mini` / `deepseek-chat` |
+| `TAVILY_API_KEY` | рекомендуется | живой веб-поиск |
+| `ADMIN_PASSWORD` | обязательно | Basic Auth для FastAPI admin |
+| `REDIS_URL` | опционально | очередь ARQ |
+| `AGENT_DB_PATH` | опционально | путь к SQLite |
+| `METRICS_PORT` | опционально | порт metrics внутри контейнера |
+| `GRAFANA_ADMIN_PASSWORD` | опционально | пароль Grafana |
+| `ENABLED_MODULES` | опционально | CSV override feature flags |
 
-### Docker Compose
+## Установка и деплой
+
+### Docker (рекомендуется)
 
 ```bash
 docker compose up -d --build
 docker compose ps
+pytest -q
 ```
 
-Сервисы:
-- `bot`
-- `worker`
-- `redis`
-- `admin-panel`
-- `prometheus`
-- `grafana`
-
-Проверка после старта:
+### Локально (без Docker)
 
 ```bash
-docker compose ps
-docker compose logs bot
-docker compose logs worker
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m telegram_bot.main
 ```
 
-### systemd (для VPS)
+### VPS (Ubuntu)
 
-```ini
-[Unit]
-Description=Watchdog Bot
-After=network-online.target
+1. Установите Docker и Docker Compose.
+2. Разверните проект в `/opt/bots/watchdog_bot`.
+3. Заполните `.env`.
+4. `docker compose up -d --build`.
+5. Проверьте `docker compose logs --tail=100 bot`.
 
-[Service]
-WorkingDirectory=/opt/watchdog_bot
-ExecStart=/opt/watchdog_bot/.venv/bin/python -m telegram_bot.main
-Restart=on-failure
-User=watchdog
-Environment=PYTHONUNBUFFERED=1
+## Мониторинг
 
-[Install]
-WantedBy=multi-user.target
-```
+- **Web Admin**: `http://<host>:8004` (user `admin` + `ADMIN_PASSWORD`)
+- **Bot metrics**: host port `8011` → container `:8001`
+- **Prometheus**: `http://<host>:9091`
+- **Grafana**: `http://<host>:3001`
 
----
+Метрики токенов/стоимости:
 
-## Monitoring
+- `agent_prompt_tokens_total`
+- `agent_completion_tokens_total`
+- `agent_estimated_cost_usd_total`
 
-- `/selftest` — функциональная проверка подсистем;
-- `/fulldiag` — расширенная диагностика (LangGraph monitor-agent);
-- `/status` — технический статус (role-protected);
-- Prometheus собирает runtime-метрики;
-- Grafana отображает latency/error/token dashboards;
-- web-admin показывает диалоги, роли и инструменты ручного восстановления.
+## Решение проблем
 
----
-
-## Troubleshooting
-
-| Симптом | Причина | Что сделать |
+| Проблема | Причина | Решение |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN is not set` | переменная не задана | заполни `.env`, перезапусти процесс |
-| `Conflict: terminated by other getUpdates request` | два polling-процесса | оставь только один экземпляр бота |
-| `Insufficient Balance` | закончился баланс провайдера | пополни баланс или переключись на `gpt-4o-mini` |
-| Пустой веб-поиск | нет `TAVILY_API_KEY` | добавь ключ в `.env` |
-| `401` на админке | неверный Basic Auth | используй `admin` + `ADMIN_PASSWORD` |
-| Нет метрик в Grafana | Prometheus не скрапит bot | проверь `monitoring/prometheus/prometheus.yml` и порты |
-| `TelegramConflictError` | второй процесс использует тот же bot token | останови лишний polling-инстанс |
+| `TELEGRAM_BOT_TOKEN is not set` | пустой `.env` | заполните токен и перезапустите |
+| `TelegramConflictError` | два polling на одном токене | оставьте один инстанс на токен |
+| Нет источников в ответе | нет/`bad` `TAVILY_API_KEY` или выключен `web_search` | задайте ключ / флаг |
+| Worker без контекста | старая версия | обновите: history передаётся в ARQ |
+| `database is locked` | старый journal mode | WAL включён в `get_connection()` — перезапустите сервисы |
+| `401` на админке | неверный пароль | `admin` + `ADMIN_PASSWORD` |
 
----
+## Разработка
 
-## Development
+- `agents/` — граф, LLM, search, memory, health
+- `telegram_bot/` — aiogram handlers / middleware
+- `admin_panel/` — FastAPI admin
+- `worker.py` — ARQ research worker
+- `monitoring/` — Prometheus/Grafana
+- `tests/` — unit/integration tests
 
-Как добавить новую команду без хаоса:
+Anchors: read API доступен в admin panel; write path reserved (без Telegram UX в этой версии).
 
-1. Добавь handler в `telegram_bot/handlers.py`.
-2. Если команда role-protected — пропиши проверку в `role_check` middleware или декоратор.
-3. Добавь/обнови тесты в `tests/`.
-4. Обнови таблицу команд в README.
-5. Сделай локальный smoke (`pytest` + запуск бота) перед push.
+## FAQ
+
+**Q: Это production-ready enterprise?**  
+A: Нет. Это portfolio-ready MVP / self-hosted assistant. Для B2B нужны Postgres, tenancy, TLS, CI.
+
+**Q: Как снизить стоимость?**  
+A: `LLM_PROVIDER=deepseek` или держите `MODEL_NAME=gpt-4o-mini`; смотрите `agent_estimated_cost_usd_total`.
+
+**Q: Обязателен ли Tavily?**  
+A: Нет. Без ключа бот работает на знаниях модели, без live sources.
+
+## License
+
+MIT — см. [LICENSE](LICENSE).

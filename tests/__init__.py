@@ -1,1 +1,1 @@
-"""Test package for LangGraph training lab."""
+"""Watchdog Bot test package."""

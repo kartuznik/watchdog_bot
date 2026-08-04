@@ -1,4 +1,4 @@
-"""Anchor storage adapted from telegram-ai-bot user_anchors module."""
+"""Conversation anchors (read API used by admin; write path reserved for later UX)."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ def auto_title_anchor(snippet: str, fallback: str = "Якорь") -> str:
 
 
 def create_anchor(user_id: int, title: str, context_snippet: str, message_ref: int = 0) -> int:
+    """Reserved write helper — not wired to Telegram handlers yet."""
     safe_title = (title or "Якорь").strip()[:MAX_ANCHOR_TITLE_LEN]
     safe_snippet = (context_snippet or "").strip()[:MAX_SNIPPET_LEN]
     with get_connection() as conn:
