@@ -15,7 +15,7 @@ from typing import cast
 from aiogram import Router
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import InlineKeyboardMarkup, Message
+from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions, Message
 
 try:
     from arq.connections import RedisSettings, create_pool
@@ -82,6 +82,7 @@ async def _answer_chunks(
     parse_mode: ParseMode | None = ParseMode.HTML,
 ) -> None:
     """Send one or more Telegram-safe chunks sequentially (HTML by default)."""
+    preview_off = LinkPreviewOptions(is_disabled=True)
     for part in parts:
         markup: InlineKeyboardMarkup | None = None
         if isinstance(part, OutgoingMessage):
@@ -91,11 +92,37 @@ async def _answer_chunks(
             text = part
         if not str(text).strip():
             continue
+        kwargs: dict = {
+            "parse_mode": parse_mode,
+            "reply_markup": markup,
+            "link_preview_options": preview_off,
+        }
         try:
-            await message.answer(text, parse_mode=parse_mode, reply_markup=markup)
+            await message.answer(text, **kwargs)
+        except TypeError:
+            # Older aiogram builds may only accept disable_web_page_preview.
+            await message.answer(
+                text,
+                parse_mode=parse_mode,
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
         except Exception:
-            # HTML can fail on rare edge cases; retry as plain text without markup tags intent.
-            await message.answer(text, parse_mode=None, reply_markup=markup)
+            # HTML can fail on rare edge cases; retry as plain text.
+            try:
+                await message.answer(
+                    text,
+                    parse_mode=None,
+                    reply_markup=markup,
+                    link_preview_options=preview_off,
+                )
+            except TypeError:
+                await message.answer(
+                    text,
+                    parse_mode=None,
+                    reply_markup=markup,
+                    disable_web_page_preview=True,
+                )
 
 
 def _redis_settings_from_env() -> RedisSettings | None:

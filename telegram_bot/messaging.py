@@ -6,6 +6,7 @@ import html
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -116,13 +117,46 @@ def _strip_source_appendix(draft: str) -> str:
     return "\n".join(lines).strip()
 
 
-def format_sources_list_html(sources: list[SourceItem], *, limit: int = 5) -> str:
+def source_display_domain(url: str) -> str:
+    """Return a short hostname for optional display (no path/query)."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        host = urlparse(raw).hostname or ""
+    except Exception:
+        host = ""
+    if not host and "://" not in raw:
+        host = raw.split("/", 1)[0]
+    host = host.lower().removeprefix("www.")
+    return host
+
+
+def format_sources_list_html(
+    sources: list[SourceItem],
+    *,
+    limit: int = 5,
+    include_domain: bool = True,
+) -> str:
+    """Numbered titles only — full URLs live on inline buttons, not in message text."""
     lines: list[str] = []
     for index, item in enumerate(sources[:limit], start=1):
-        title = _escape(item["title"] or item["url"])
-        url = _escape(item["url"])
-        lines.append(f"{index}. <b>{title}</b>\n{url}")
+        title = _escape(item["title"] or item["url"] or "Источник")
+        domain = source_display_domain(item["url"]) if include_domain else ""
+        if domain:
+            lines.append(f"{index}. <b>{title}</b> ({_escape(domain)})")
+        else:
+            lines.append(f"{index}. <b>{title}</b>")
     return "\n".join(lines)
+
+
+def _truncate_button_label(label: str, *, limit: int = 64) -> str:
+    text = " ".join((label or "").split())
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return text[:limit]
+    return text[: limit - 1].rstrip() + "…"
 
 
 def build_sources_keyboard(
@@ -131,9 +165,7 @@ def build_sources_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     for index, item in enumerate(sources[:limit], start=1):
         title = (item["title"] or item["url"]).strip()
-        label = f"{index}. {title}"
-        if len(label) > 64:
-            label = label[:61] + "..."
+        label = _truncate_button_label(f"{index}. {title}", limit=64)
         rows.append([InlineKeyboardButton(text=label, url=item["url"])])
     if not rows:
         return None
