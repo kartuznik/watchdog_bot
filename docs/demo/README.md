@@ -1,13 +1,26 @@
-# Demo assets (placeholders)
+# Watchdog Bot Demo Screenshots
 
-Place screenshots and short GIFs here for the portfolio README. Suggested filenames:
+This folder contains demo screenshots for the Watchdog Bot portfolio.
 
-| File | What to capture |
-|---|---|
-| `01-router-creative.png` | Creative request progress (no search) → poem reply |
-| `02-search-sources.png` | Factual/search reply with Draft → Summary → Sources |
-| `03-progress.gif` | Live stage updates on a single Telegram service message |
-| `04-admin-usage.png` | Admin panel usage table + Export / Soft-delete |
-| `05-grafana-overview.png` | Grafana Watchdog Bot Overview (cost, router, fallback, queue lag) |
+## Files
 
-Media is intentionally not committed until the Architect adds production captures.
+| File | Description |
+|------|-------------|
+| `01-router-creative.png` | Creative query without search (progress stages) — TODO |
+| `02-search-sources.png` | Factual query with live search + clickable sources |
+| `03-progress.gif` | Live progress stages animation — TODO |
+| `04-admin-usage.png` | Admin panel: usage, export, soft-delete |
+| `05-grafana-overview.png` | Grafana dashboard + alerts overview |
+
+## Live Demo
+
+Try the bot: [@watchdogassistant_bot](https://t.me/watchdogassistant_bot)
+
+Sample queries:
+- "какие новости сегодня" — live search with sources
+- "что такое RAG" — factual without search
+- "новости про ИИ" — with freshness markers
+
+## GitHub
+
+Repository: [github.com/kartuznik/watchdog_bot](https://github.com/kartuznik/watchdog_bot)
