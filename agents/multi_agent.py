@@ -15,7 +15,7 @@ from agents.llm_config import LLMConfig
 from agents.metrics import observe_llm_fallback, observe_router_decision
 from agents.router import merge_router_decision
 from agents.tg_parser import extract_telegram_usernames, fetch_many_channels_async
-from agents.web_search import SourceItem, WebSearchTool, normalize_source_items
+from agents.web_search import SourceItem, WebSearchTool, build_search_query, normalize_source_items
 from config import is_module_enabled
 
 logger = logging.getLogger(__name__)
@@ -324,19 +324,34 @@ async def web_search_node(state: MultiAgentState) -> dict[str, Any]:
             "web_sources": list(state.get("web_sources") or []),
         }
 
+    tavily_query = build_search_query(topic)
+    logger.info(
+        "Tavily search original_topic=%r tavily_query=%r",
+        topic[:240],
+        tavily_query[:240],
+    )
+
     tavily_text = ""
     tavily_sources: list[SourceItem] = []
     try:
         web_tool = WebSearchTool()
-        tavily_text, tavily_sources = await asyncio.to_thread(
-            web_tool.search_with_sources,
-            topic,
-            4,
-        )
+
+        def _run_tavily() -> tuple[str, list[SourceItem]]:
+            return web_tool.search_with_sources(
+                tavily_query,
+                4,
+                relevance_query=topic,
+            )
+
+        tavily_text, tavily_sources = await asyncio.to_thread(_run_tavily)
     except ValueError:
         logger.info("Tavily not configured: TAVILY_API_KEY is missing.")
     except Exception:
-        logger.exception("Tavily search failed for topic=%r", topic[:180])
+        logger.exception(
+            "Tavily search failed original_topic=%r tavily_query=%r",
+            topic[:180],
+            tavily_query[:180],
+        )
 
     usernames = extract_telegram_usernames(topic)
     tg_posts = await fetch_many_channels_async(usernames, per_channel=2) if usernames else []

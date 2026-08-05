@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any, TypedDict
 
 from tavily import TavilyClient
@@ -12,10 +13,181 @@ from tavily.errors import TimeoutError as TavilyTimeoutError
 
 logger = logging.getLogger(__name__)
 
+# Leading interrogatives that poison Tavily ranking toward dictionary pages.
+_LEADING_QUESTION_WORDS = frozenset(
+    {
+        "какие",
+        "какой",
+        "какая",
+        "какое",
+        "каким",
+        "какими",
+        "каких",
+        "что",
+        "чем",
+        "чего",
+        "как",
+        "кто",
+        "кого",
+        "кому",
+        "где",
+        "когда",
+        "почему",
+        "зачем",
+        "откуда",
+        "куда",
+        "сколько",
+        "чей",
+        "чья",
+        "чьё",
+        "чьи",
+        "ли",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "where",
+        "when",
+        "why",
+        "how",
+    }
+)
+
+_STOPWORDS = frozenset(
+    {
+        "и",
+        "в",
+        "во",
+        "на",
+        "по",
+        "про",
+        "о",
+        "об",
+        "от",
+        "для",
+        "из",
+        "к",
+        "ко",
+        "с",
+        "со",
+        "у",
+        "а",
+        "но",
+        "же",
+        "бы",
+        "то",
+        "это",
+        "этот",
+        "эта",
+        "эти",
+        "the",
+        "a",
+        "an",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "with",
+        "about",
+        "is",
+        "are",
+        "be",
+    }
+) | _LEADING_QUESTION_WORDS
+
+_MIN_SEARCH_QUERY_CHARS = 8
+_TOKEN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+", re.UNICODE)
+
 
 class SourceItem(TypedDict):
     title: str
     url: str
+
+
+def _tokenize(text: str) -> list[str]:
+    return [m.group(0).lower() for m in _TOKEN_RE.finditer(text or "")]
+
+
+def significant_terms(text: str) -> set[str]:
+    """Content-bearing tokens: drop stop/question words and ultra-short noise."""
+    terms: set[str] = set()
+    for tok in _tokenize(text):
+        if tok in _STOPWORDS:
+            continue
+        # Keep short but meaningful tokens like "ИИ", "AI", years.
+        if len(tok) < 2:
+            continue
+        if len(tok) == 2 and not tok.isalpha():
+            continue
+        terms.add(tok)
+    return terms
+
+
+def build_search_query(original: str, *, min_chars: int = _MIN_SEARCH_QUERY_CHARS) -> str:
+    """Soft reformulation for Tavily: strip leading interrogatives/stopwords.
+
+    Gate: if reformulation is too short or loses all significant terms from the
+    original, return the full original topic and log a WARNING.
+    """
+    original_clean = " ".join((original or "").strip().split())
+    if not original_clean:
+        return ""
+
+    tokens = _tokenize(original_clean)
+    # Drop leading question words only (keep mid-sentence "как" etc. as stopwords later).
+    while tokens and tokens[0] in _LEADING_QUESTION_WORDS:
+        tokens = tokens[1:]
+
+    kept = [t for t in tokens if t not in _STOPWORDS]
+    # Prefer original casing for multi-word rebuild from significant tokens order.
+    reformulated = " ".join(kept).strip()
+    original_sig = significant_terms(original_clean)
+    reform_sig = significant_terms(reformulated)
+
+    too_short = len(reformulated) < max(1, int(min_chars))
+    lost_signal = bool(original_sig) and not (reform_sig & original_sig)
+
+    if too_short or lost_signal or not reformulated:
+        logger.warning(
+            "search query gate: falling back to full original "
+            "(too_short=%s lost_signal=%s reform=%r original=%r)",
+            too_short,
+            lost_signal,
+            reformulated[:180],
+            original_clean[:180],
+        )
+        return original_clean
+
+    return reformulated
+
+
+def filter_relevant_sources(
+    query: str,
+    sources: list[SourceItem] | list[dict[str, Any]] | None,
+) -> list[SourceItem]:
+    """Drop sources whose titles share no significant terms with the query."""
+    query_terms = significant_terms(query)
+    normalized = normalize_source_items(list(sources or []))
+    if not query_terms:
+        return normalized
+
+    kept: list[SourceItem] = []
+    for item in normalized:
+        title = str(item.get("title") or "")
+        title_terms = significant_terms(title)
+        overlap = query_terms & title_terms
+        if not overlap:
+            logger.info(
+                "source relevance filter: drop title=%r url=%r reason=no_term_overlap query_terms=%s",
+                title[:120],
+                str(item.get("url") or "")[:180],
+                sorted(query_terms)[:12],
+            )
+            continue
+        kept.append(item)
+    return kept
 
 
 def normalize_source_items(raw: list[Any] | None) -> list[SourceItem]:
@@ -52,11 +224,15 @@ class WebSearchTool:
         return text
 
     def search_with_sources(
-        self, query: str, max_results: int = 3
+        self,
+        query: str,
+        max_results: int = 3,
+        *,
+        relevance_query: str | None = None,
     ) -> tuple[str, list[SourceItem]]:
         response = self.client.search(query=query, max_results=max_results, timeout=25)
-        lines: list[str] = []
-        sources: list[SourceItem] = []
+        raw_sources: list[SourceItem] = []
+        raw_lines: dict[str, str] = {}
         for item in response.get("results", []):
             if not isinstance(item, dict):
                 continue
@@ -64,11 +240,14 @@ class WebSearchTool:
             title = str(item.get("title") or url or "Без названия").strip()
             content = str(item.get("content", "")).strip().replace("\n", " ")
             if url:
-                sources.append({"title": title[:120], "url": url})
-                lines.append(f"{title}\nURL: {url}\nКонтент: {content}")
+                raw_sources.append({"title": title[:120], "url": url})
+                raw_lines[url] = f"{title}\nURL: {url}\nКонтент: {content}"
             elif content:
-                lines.append(f"Контент: {content}")
-        return "\n\n".join(lines), normalize_source_items(sources)
+                # Untitled snippets cannot be relevance-checked by title; skip structured list.
+                continue
+        kept = filter_relevant_sources(relevance_query or query, raw_sources)
+        lines = [raw_lines[item["url"]] for item in kept if item["url"] in raw_lines]
+        return "\n\n".join(lines), kept
 
 
 class TavilyWebSearch:
