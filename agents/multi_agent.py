@@ -15,7 +15,14 @@ from agents.llm_config import LLMConfig
 from agents.metrics import observe_llm_fallback, observe_router_decision
 from agents.router import merge_router_decision
 from agents.tg_parser import extract_telegram_usernames, fetch_many_channels_async
-from agents.web_search import SourceItem, WebSearchTool, build_search_query, normalize_source_items
+from agents.web_search import (
+    SourceItem,
+    WebSearchTool,
+    build_search_query,
+    evidence_stats,
+    format_evidence_cards,
+    normalize_source_items,
+)
 from config import is_module_enabled
 
 logger = logging.getLogger(__name__)
@@ -41,6 +48,7 @@ class MultiAgentState(TypedDict):
     research_data: str
     research_summary: str
     web_sources: list[SourceItem]
+    source_evidence: list[SourceItem]
     draft: str
     feedback: str
     revision_count: int
@@ -51,6 +59,96 @@ class MultiAgentState(TypedDict):
     need_web_search: bool
     router_mode: str
     router_reason: str
+
+
+_FRESHNESS_MARKERS = (
+    "сегодня",
+    "сейчас",
+    "последн",
+    "текущ",
+    "свеж",
+    "live",
+    "breaking",
+    "today",
+    "latest",
+    "current",
+)
+
+_GROUNDING_SYSTEM = (
+    "ЖЁСТКИЕ ПРАВИЛА ЗАЗЕМЛЕНИЯ:\n"
+    "1) Факты и даты бери ТОЛЬКО из блока SOURCE_EVIDENCE (сниппеты и published_at).\n"
+    "2) Запрещено использовать parametric memory модели для фактов, событий и дат.\n"
+    "3) Если в evidence нет нужных фактов — честно напиши, что именно покрывают источники, "
+    "и чего в них нет. Не додумывай.\n"
+    "4) Даты указывай только если они есть в published_at или в тексте сниппета."
+)
+
+
+def topic_needs_freshness(topic: str) -> bool:
+    text = (topic or "").strip().lower()
+    return any(marker in text for marker in _FRESHNESS_MARKERS)
+
+
+def extract_year_mentions(text: str) -> set[int]:
+    years = set()
+    for match in re.finditer(r"\b(19|20)\d{2}\b", text or ""):
+        years.add(int(match.group(0)))
+    return years
+
+
+def evidence_year_mentions(evidence: list[SourceItem] | list[dict[str, Any]] | None) -> set[int]:
+    years: set[int] = set()
+    for item in normalize_source_items(list(evidence or [])):
+        blob = f"{item.get('published_at', '')} {item.get('snippet', '')} {item.get('title', '')}"
+        years |= extract_year_mentions(blob)
+    return years
+
+
+def review_grounding_freshness(
+    topic: str,
+    draft: str,
+    evidence: list[SourceItem] | list[dict[str, Any]] | None,
+) -> tuple[bool, str]:
+    """Return (needs_revise, feedback) for freshness/grounding mismatches."""
+    if not topic_needs_freshness(topic):
+        return False, ""
+    items = normalize_source_items(list(evidence or []))
+    if not items:
+        return True, (
+            "Запрос требует актуальности, но SOURCE_EVIDENCE пуст. "
+            "Перепиши ответ честно: без свежих источников нельзя утверждать новости/даты."
+        )
+
+    draft_years = extract_year_mentions(draft)
+    evidence_years = evidence_year_mentions(items)
+    if draft_years and evidence_years:
+        if max(draft_years) < max(evidence_years):
+            return True, (
+                f"Рассинхрон свежести: черновик опирается на год {max(draft_years)}, "
+                f"тогда как источники содержат более свежие датировки "
+                f"(до {max(evidence_years)}). Перепиши факты и даты строго по SOURCE_EVIDENCE."
+            )
+
+    unsupported = sorted(y for y in draft_years if y not in evidence_years)
+    if unsupported and evidence_years:
+        return True, (
+            "В черновике есть датировки, которых нет в SOURCE_EVIDENCE: "
+            f"{', '.join(str(y) for y in unsupported)}. "
+            "Убери их или замени датами/фактами из сниппетов."
+        )
+    return False, ""
+
+
+def _log_evidence(stage: str, evidence: list[SourceItem] | list[dict[str, Any]] | None) -> None:
+    snippets, chars = evidence_stats(evidence)
+    logger.info("evidence_%s evidence_snippets=%s evidence_chars=%s", stage, snippets, chars)
+
+
+def _evidence_block(state: MultiAgentState) -> str:
+    evidence = list(state.get("source_evidence") or [])
+    if not evidence:
+        evidence = list(state.get("web_sources") or [])
+    return format_evidence_cards(evidence)
 
 
 def _extract_usage(message: Any) -> tuple[int, int]:
@@ -179,7 +277,9 @@ def fit_text_budget(text: str, budget: int = RESEARCH_SUMMARY_BUDGET) -> str:
 def _source_context_lines(web_sources: list[SourceItem], limit: int = 5) -> list[str]:
     lines: list[str] = []
     for item in normalize_source_items(web_sources)[:limit]:
-        lines.append(f"- {item['title']}: {item['url']}")
+        published = str(item.get("published_at") or "").strip()
+        suffix = f" ({published})" if published else ""
+        lines.append(f"- {item['title']}{suffix}: {item['url']}")
     return lines
 
 
@@ -231,7 +331,18 @@ def _mock_research_summary(state: MultiAgentState) -> dict[str, str]:
 def _mock_writer(state: MultiAgentState) -> dict[str, str]:
     topic = state["topic"]
     research_data = state["research_data"]
+    evidence = list(state.get("source_evidence") or state.get("web_sources") or [])
     feedback = state["feedback"].strip()
+    if evidence and not feedback:
+        # Grounded mock: surface first snippet facts/dates into the draft for tests.
+        card = evidence[0]
+        published = str(card.get("published_at") or "").strip() or "дата не указана"
+        snippet = str(card.get("snippet") or "").strip()
+        draft = (
+            f"По теме «{topic}» согласно источнику «{card.get('title', '')}» "
+            f"({published}): {snippet}"
+        )
+        return {"draft": draft}
     if feedback:
         draft = (
             f"Улучшенный материал по теме '{topic}': {research_data}. "
@@ -252,12 +363,24 @@ def _mock_writer(state: MultiAgentState) -> dict[str, str]:
 
 
 def _mock_review(state: MultiAgentState) -> dict[str, str | int]:
-    """Deterministic reviewer without magic words — criteria on draft quality markers."""
-    draft = state["draft"].lower()
+    """Deterministic reviewer — quality markers + grounding/freshness gate."""
+    draft = state["draft"]
+    needs_revise, freshness_feedback = review_grounding_freshness(
+        state["topic"],
+        draft,
+        list(state.get("source_evidence") or state.get("web_sources") or []),
+    )
+    if needs_revise and state["revision_count"] < MAX_REVISIONS:
+        return {
+            "feedback": freshness_feedback,
+            "revision_count": state["revision_count"] + 1,
+        }
+
+    draft_l = draft.lower()
     needs_work = (
-        "требуется доработка" in draft
-        or "мало структуры" in draft
-        or ("плохой" in state["topic"].lower() and "улучшенный материал" not in draft)
+        "требуется доработка" in draft_l
+        or "мало структуры" in draft_l
+        or ("плохой" in state["topic"].lower() and "улучшенный материал" not in draft_l)
     )
     if needs_work and state["revision_count"] < MAX_REVISIONS:
         return {
@@ -322,6 +445,7 @@ async def web_search_node(state: MultiAgentState) -> dict[str, Any]:
             "research_data": state.get("research_data")
             or "Веб-поиск пропущен роутером или отключён.",
             "web_sources": list(state.get("web_sources") or []),
+            "source_evidence": list(state.get("source_evidence") or []),
         }
 
     tavily_query = build_search_query(topic)
@@ -356,50 +480,69 @@ async def web_search_node(state: MultiAgentState) -> dict[str, Any]:
     usernames = extract_telegram_usernames(topic)
     tg_posts = await fetch_many_channels_async(usernames, per_channel=2) if usernames else []
 
-    blocks: list[str] = []
     sources: list[SourceItem] = list(tavily_sources)
-    if tavily_text.strip():
-        blocks.append("Веб-результаты (Tavily):\n" + tavily_text.strip())
-    else:
-        blocks.append("Tavily не настроен (нет TAVILY_API_KEY).")
-
     if tg_posts:
-        lines = []
         for post in tg_posts[:4]:
             title = str(post.get("title", "Пост Telegram")).strip()
             url = str(post.get("url", "")).strip()
-            content = str(post.get("content", "")).strip()
-            if url:
-                sources.append({"title": title or url, "url": url})
-                lines.append(f"- {title}\n  URL: {url}\n  {content[:220]}")
-            else:
-                lines.append(f"- {title}\n  {content[:220]}")
-        blocks.append("Публичные Telegram-каналы:\n" + "\n".join(lines))
+            content = str(post.get("content", "")).strip().replace("\n", " ")
+            if not url:
+                continue
+            sources.append(
+                {
+                    "title": (title or url)[:120],
+                    "url": url,
+                    "snippet": content[:700],
+                    "published_at": "",
+                }
+            )
 
-    if not blocks:
-        blocks.append("Внешние источники не найдены, используй базовые знания модели.")
+    evidence = normalize_source_items(sources)
+    cards = format_evidence_cards(evidence)
+    _log_evidence("web_search", evidence)
+
+    if evidence:
+        research_data = "SOURCE_EVIDENCE (immutable cards):\n" + cards
+    elif tavily_text.strip():
+        research_data = tavily_text.strip()
+    else:
+        research_data = (
+            "Внешние источники не найдены. Нельзя утверждать свежие факты без evidence."
+        )
+
     return {
-        "research_data": "\n\n".join(blocks),
-        "web_sources": normalize_source_items(sources),
+        "research_data": research_data,
+        "web_sources": evidence,
+        "source_evidence": evidence,
     }
 
 
 async def research_node(state: MultiAgentState) -> dict[str, str | int | float]:
-    """Researcher node: collect and synthesize context."""
+    """Researcher node: grounded synthesis over immutable source_evidence."""
+    evidence = list(state.get("source_evidence") or state.get("web_sources") or [])
+    _log_evidence("research", evidence)
     if not state["use_llm"]:
+        if evidence:
+            return {
+                "research_data": (
+                    "Grounded synthesis:\n"
+                    + format_evidence_cards(evidence)
+                )
+            }
         return _mock_research(state)
 
     history_text = _history_as_text(state["conversation_history"])
     user_prompt = (
         f"Тема: {state['topic']}\n\n"
         f"История диалога:\n{history_text}\n\n"
-        f"Черновые внешние данные:\n{state['research_data']}\n\n"
-        "Собери краткое исследование: ключевые факты, риски, практические выводы."
+        f"SOURCE_EVIDENCE:\n{_evidence_block(state)}\n\n"
+        "Собери краткое заземлённое исследование: только факты/даты из SOURCE_EVIDENCE. "
+        "Если данных мало — явно перечисли пробелы покрытия источников."
     )
     result = await _invoke_llm(
         system_prompt=(
             "Ты Researcher-агент. Пиши на русском. "
-            "Дай плотное, факт-ориентированное исследование без воды."
+            f"{_GROUNDING_SYSTEM}"
         ),
         user_prompt=user_prompt,
         temperature=0.1,
@@ -408,26 +551,44 @@ async def research_node(state: MultiAgentState) -> dict[str, str | int | float]:
         return _mock_research(state)
     text, prompt_tokens, completion_tokens = result
     update = _token_cost_update(state, prompt_tokens, completion_tokens)
-    update["research_data"] = text or _mock_research(state)["research_data"]
+    # Keep evidence cards visible for downstream nodes inside research_data synthesis.
+    synthesis = (text or "").strip() or _mock_research(state)["research_data"]
+    update["research_data"] = (
+        "SOURCE_EVIDENCE (immutable cards):\n"
+        f"{_evidence_block(state)}\n\n"
+        f"GROUNDED_SYNTHESIS:\n{synthesis}"
+    )
     return update
 
 
 async def research_summary_node(state: MultiAgentState) -> dict[str, str | int | float]:
-    """Compact 3–5 bullet research summary for Telegram presentation (≤800 chars)."""
+    """Compact 3–5 bullet summary grounded in source_evidence / research_data."""
     if not state["use_llm"]:
+        evidence = list(state.get("source_evidence") or [])
+        if evidence:
+            lines = []
+            for idx, item in enumerate(evidence[:4], start=1):
+                published = item.get("published_at") or "дата не указана"
+                snippet = (item.get("snippet") or "")[:160]
+                lines.append(f"{idx}. ({published}) {snippet}")
+            summary = "\n".join(lines) or _mock_research_summary(state)["research_summary"]
+            return {"research_summary": fit_text_budget(summary, RESEARCH_SUMMARY_BUDGET)}
         return _mock_research_summary(state)
 
     user_prompt = (
         f"Тема: {state['topic']}\n\n"
-        f"Полное исследование:\n{state['research_data']}\n\n"
-        "Сделай компактное саммари из 3-5 нумерованных пунктов на русском. "
+        f"SOURCE_EVIDENCE:\n{_evidence_block(state)}\n\n"
+        f"GROUNDED_SYNTHESIS:\n{state['research_data']}\n\n"
+        "Сделай компактное саммари из 3-5 нумерованных пунктов на русском "
+        "ТОЛЬКО по evidence/synthesis выше. "
         f"Жёсткий бюджет: не больше {RESEARCH_SUMMARY_BUDGET} символов. "
-        "Не обрывай слова. Без markdown-заголовков и без ссылок."
+        "Не обрывай слова. Без markdown-заголовков и без ссылок. "
+        "Если факт/дата не в evidence — не пиши его."
     )
     result = await _invoke_llm(
         system_prompt=(
             "Ты редактор-суммаризатор. Пиши только нумерованный список 3-5 пунктов. "
-            "Каждый пункт — одно законченное предложение."
+            f"{_GROUNDING_SYSTEM}"
         ),
         user_prompt=user_prompt,
         temperature=0,
@@ -447,38 +608,44 @@ async def research_summary_node(state: MultiAgentState) -> dict[str, str | int |
 
 
 async def writer_node(state: MultiAgentState) -> dict[str, str | int | float]:
-    """Writer node: draft content from research + reviewer feedback."""
+    """Writer node: draft content grounded in source_evidence + synthesis."""
+    evidence = list(state.get("source_evidence") or state.get("web_sources") or [])
+    _log_evidence("writer", evidence)
     if not state["use_llm"]:
         return _mock_writer(state)
 
     feedback = state["feedback"].strip() or "Нет обратной связи."
-    source_lines = _source_context_lines(state["web_sources"])
-    sources_context = (
-        "Список подтвержденных источников:\n" + "\n".join(source_lines)
-        if source_lines
-        else "Список подтвержденных источников отсутствует."
-    )
-    research_block = state["research_data"].strip() or state.get("research_summary", "")
-    if str(state.get("router_mode") or "") == "creative" and not research_block:
-        research_block = "Креативный запрос: опирайся на формулировку темы, без псевдофактов."
-    user_prompt = (
-        f"Тема: {state['topic']}\n\n"
-        f"Исследование:\n{research_block}\n\n"
-        f"{sources_context}\n\n"
-        f"Обратная связь ревьюера: {feedback}\n\n"
-        "Напиши финальный ответ в 3-5 коротких абзацах. "
-        "Если это исправленная версия, явно улучши структуру и ясность. "
-        "НЕ добавляй список источников и НЕ используй markdown-заголовки с # — "
-        "источники уйдут отдельным сообщением."
-    )
-    result = await _invoke_llm(
-        system_prompt=(
+    is_creative = str(state.get("router_mode") or "") == "creative" and not evidence
+    if is_creative:
+        user_prompt = (
+            f"Тема: {state['topic']}\n\n"
+            f"Обратная связь ревьюера: {feedback}\n\n"
+            "Креативный ответ без претензии на свежие факты/новости. "
+            "НЕ добавляй список источников и НЕ используй markdown-заголовки с #."
+        )
+        system_prompt = (
+            "Ты Writer-агент. Пиши ясно, с юмором. "
+            "Это креативный режим — не выдумывай новостные факты и даты."
+        )
+    else:
+        user_prompt = (
+            f"Тема: {state['topic']}\n\n"
+            f"SOURCE_EVIDENCE:\n{_evidence_block(state)}\n\n"
+            f"GROUNDED_SYNTHESIS:\n{state['research_data']}\n\n"
+            f"Обратная связь ревьюера: {feedback}\n\n"
+            "Напиши финальный ответ в 3-5 коротких абзацах. "
+            "Каждый факт и каждая дата — только из SOURCE_EVIDENCE. "
+            "Если evidence не покрывает вопрос — скажи об этом прямо. "
+            "НЕ добавляй список источников и НЕ используй markdown-заголовки с # — "
+            "источники уйдут отдельным сообщением."
+        )
+        system_prompt = (
             "Ты Writer-агент. Пиши ясно, структурно, практично. "
-            "Не выдумывай факты, опирайся на исследование. "
-            "Отвечай по-русски, лаконично, с юмором и метафорами. "
-            "БЕЗ воды и канцеляризмов. Максимум 3-5 предложений. "
-            "Если можешь ответить кратко — отвечай кратко."
-        ),
+            f"{_GROUNDING_SYSTEM} "
+            "Отвечай по-русски, лаконично. БЕЗ воды и канцеляризмов."
+        )
+    result = await _invoke_llm(
+        system_prompt=system_prompt,
         user_prompt=user_prompt,
         temperature=0.2,
     )
@@ -547,28 +714,51 @@ def should_approve_review(
 
 
 async def reviewer_node(state: MultiAgentState) -> dict[str, str | int | float]:
-    """Reviewer node: structured JSON scores + approve/revise without magic words."""
+    """Reviewer node: grounding/freshness gate + structured JSON scores."""
     revision_count = state["revision_count"]
+    evidence = list(state.get("source_evidence") or state.get("web_sources") or [])
+    needs_revise, freshness_feedback = review_grounding_freshness(
+        state["topic"],
+        state["draft"],
+        evidence,
+    )
+    if needs_revise and revision_count < MAX_REVISIONS:
+        logger.info("reviewer freshness gate revise: %s", freshness_feedback[:200])
+        update: dict[str, str | int | float] = {
+            "feedback": freshness_feedback,
+            "revision_count": revision_count + 1,
+        }
+        return update
+
     if not state["use_llm"]:
         return _mock_review(state)
 
+    freshness_note = (
+        "Запрос содержит маркеры актуальности: grounding и свежесть обязательны. "
+        "Любая дата/факт вне SOURCE_EVIDENCE → decision=revise."
+        if topic_needs_freshness(state["topic"])
+        else "Проверь grounding относительно SOURCE_EVIDENCE."
+    )
     user_prompt = (
         f"Тема: {state['topic']}\n\n"
+        f"SOURCE_EVIDENCE:\n{_evidence_block(state)}\n\n"
         f"Черновик:\n{state['draft']}\n\n"
+        f"{freshness_note}\n"
         "Оцени черновик и верни JSON строго формата:\n"
         "{"
         '"decision": "approve"|"revise", '
         '"scores": {"clarity":1-5, "completeness":1-5, "grounding":1-5, "structure":1-5}, '
         '"feedback": "строка"'
         "}\n"
-        "approve только если ответ ясен, полон, опирается на факты и хорошо структурирован. "
-        "При revise укажи конкретный feedback."
+        "approve только если ответ ясен, полон, заземлён в SOURCE_EVIDENCE и хорошо структурирован. "
+        "При revise укажи конкретный feedback о рассинхроне фактов/дат."
     )
     result = await _invoke_llm(
         system_prompt=(
-            "Ты Reviewer-агент. Оценивай по критериям clarity/completeness/grounding/structure. "
+            "Ты Reviewer-агент. Оценивай clarity/completeness/grounding/structure. "
+            f"{_GROUNDING_SYSTEM} "
             "Отвечай только валидным JSON без markdown. "
-            "Feedback пиши по-русски, лаконично, без воды."
+            "Feedback пиши по-русски, лаконично."
         ),
         user_prompt=user_prompt,
         temperature=0,
@@ -578,6 +768,14 @@ async def reviewer_node(state: MultiAgentState) -> dict[str, str | int | float]:
 
     text, prompt_tokens, completion_tokens = result
     decision, scores, feedback = parse_reviewer_payload(text)
+    # Hard floor on grounding for freshness queries.
+    if topic_needs_freshness(state["topic"]) and scores.get("grounding", 5) < 4.0:
+        decision = "revise"
+        if not feedback.strip():
+            feedback = (
+                "Низкий grounding при актуальном запросе: перепиши факты/даты "
+                "строго по SOURCE_EVIDENCE."
+            )
     approved = should_approve_review(decision, scores, feedback)
     update = _token_cost_update(state, prompt_tokens, completion_tokens)
 
@@ -587,7 +785,7 @@ async def reviewer_node(state: MultiAgentState) -> dict[str, str | int | float]:
 
     if revision_count < MAX_REVISIONS:
         update["feedback"] = feedback or (
-            "Улучши ясность, полноту и структуру ответа по замечаниям ревьюера."
+            "Улучши ясность, полноту и grounding ответа по SOURCE_EVIDENCE."
         )
         update["revision_count"] = revision_count + 1
         return update
@@ -652,6 +850,7 @@ def build_initial_multi_agent_state(
         "research_data": "",
         "research_summary": "",
         "web_sources": [],
+        "source_evidence": [],
         "draft": "",
         "feedback": "",
         "revision_count": 0,

@@ -105,6 +105,7 @@ async def process_research_task(
             "research_summary": str(merged.get("research_summary", "") or "").strip(),
             "research_data": str(merged.get("research_data", "") or "").strip(),
             "web_sources": list(merged.get("web_sources") or []),
+            "source_evidence": list(merged.get("source_evidence") or merged.get("web_sources") or []),
             "revision_count": int(merged.get("revision_count", 0) or 0),
             "llm_prompt_tokens": prompt_tokens,
             "llm_completion_tokens": completion_tokens,

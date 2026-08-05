@@ -111,7 +111,19 @@ flowchart LR
 
 `web_search_node` всегда логирует пару `original_topic` + `tavily_query`.  
 После ответа Tavily `filter_relevant_sources` отбрасывает источники без пересечения значимых
-слов заголовка с запросом (типичный мусор: словарные/переводные страницы по вопросительному слову).
+слов заголовка/сниппета с запросом (типичный мусор: словарные/переводные страницы).
+
+## Grounded generation
+
+Retrieval больше не декорация для ссылок:
+
+1. `SourceItem` хранит `title`, `url`, `snippet`, `published_at`.
+2. `source_evidence` в state **immutable** после `web_search_node`.
+3. `research_data` — grounded-синтез *поверх* evidence; Writer и Reviewer всегда видят оба блока.
+4. Researcher/Writer/Summary: факты и даты **только** из evidence; parametric memory для фактов запрещена.
+5. Reviewer при маркерах актуальности (`сегодня`, `сейчас`, `последн`, `текущ`, `live`, `breaking`)
+   режет черновики с датами вне источников или явно устаревшими относительно evidence.
+6. Логи: `evidence_snippets` / `evidence_chars` перед Researcher и Writer.
 
 ## Progress indicators (живой UX)
 

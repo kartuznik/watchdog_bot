@@ -99,11 +99,14 @@ _STOPWORDS = frozenset(
 
 _MIN_SEARCH_QUERY_CHARS = 8
 _TOKEN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+", re.UNICODE)
+_SNIPPET_LIMIT = 700
 
 
 class SourceItem(TypedDict):
     title: str
     url: str
+    snippet: str
+    published_at: str
 
 
 def _tokenize(text: str) -> list[str]:
@@ -116,7 +119,6 @@ def significant_terms(text: str) -> set[str]:
     for tok in _tokenize(text):
         if tok in _STOPWORDS:
             continue
-        # Keep short but meaningful tokens like "ИИ", "AI", years.
         if len(tok) < 2:
             continue
         if len(tok) == 2 and not tok.isalpha():
@@ -136,12 +138,10 @@ def build_search_query(original: str, *, min_chars: int = _MIN_SEARCH_QUERY_CHAR
         return ""
 
     tokens = _tokenize(original_clean)
-    # Drop leading question words only (keep mid-sentence "как" etc. as stopwords later).
     while tokens and tokens[0] in _LEADING_QUESTION_WORDS:
         tokens = tokens[1:]
 
     kept = [t for t in tokens if t not in _STOPWORDS]
-    # Prefer original casing for multi-word rebuild from significant tokens order.
     reformulated = " ".join(kept).strip()
     original_sig = significant_terms(original_clean)
     reform_sig = significant_terms(reformulated)
@@ -163,11 +163,53 @@ def build_search_query(original: str, *, min_chars: int = _MIN_SEARCH_QUERY_CHAR
     return reformulated
 
 
+def extract_published_at(item: dict[str, Any]) -> str:
+    """Best-effort publication date from Tavily (or similar) result dict."""
+    for key in (
+        "published_date",
+        "published_at",
+        "published",
+        "date",
+        "pub_date",
+    ):
+        raw = item.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            return text[:64]
+    return ""
+
+
+def format_evidence_cards(sources: list[SourceItem] | list[dict[str, Any]] | None) -> str:
+    """Numbered source cards for research_data / LLM context."""
+    items = normalize_source_items(list(sources or []))
+    if not items:
+        return "Подтверждённые источники отсутствуют."
+    lines: list[str] = []
+    for idx, item in enumerate(items, start=1):
+        published = str(item.get("published_at") or "").strip() or "дата не указана"
+        snippet = str(item.get("snippet") or "").strip() or "(сниппет отсутствует)"
+        lines.append(
+            f"{idx}. {item['title']}\n"
+            f"   URL: {item['url']}\n"
+            f"   Дата публикации: {published}\n"
+            f"   Сниппет: {snippet}"
+        )
+    return "\n".join(lines)
+
+
+def evidence_stats(sources: list[SourceItem] | list[dict[str, Any]] | None) -> tuple[int, int]:
+    items = normalize_source_items(list(sources or []))
+    chars = sum(len(str(i.get("snippet") or "")) for i in items)
+    return len(items), chars
+
+
 def filter_relevant_sources(
     query: str,
     sources: list[SourceItem] | list[dict[str, Any]] | None,
 ) -> list[SourceItem]:
-    """Drop sources whose titles share no significant terms with the query."""
+    """Drop sources whose title/snippet share no significant terms with the query."""
     query_terms = significant_terms(query)
     normalized = normalize_source_items(list(sources or []))
     if not query_terms:
@@ -176,7 +218,8 @@ def filter_relevant_sources(
     kept: list[SourceItem] = []
     for item in normalized:
         title = str(item.get("title") or "")
-        title_terms = significant_terms(title)
+        snippet = str(item.get("snippet") or "")
+        title_terms = significant_terms(f"{title} {snippet}")
         overlap = query_terms & title_terms
         if not overlap:
             logger.info(
@@ -191,22 +234,35 @@ def filter_relevant_sources(
 
 
 def normalize_source_items(raw: list[Any] | None) -> list[SourceItem]:
-    """Normalize URL strings or {title,url} dicts into SourceItem list."""
+    """Normalize URL strings or dicts into SourceItem list (keeps snippet/date)."""
     items: list[SourceItem] = []
     seen: set[str] = set()
     for entry in raw or []:
         title = ""
         url = ""
+        snippet = ""
+        published_at = ""
         if isinstance(entry, str):
             url = entry.strip()
             title = url
         elif isinstance(entry, dict):
             url = str(entry.get("url", "")).strip()
             title = str(entry.get("title") or url).strip() or url
+            snippet = str(entry.get("snippet") or entry.get("content") or "").strip()
+            published_at = str(entry.get("published_at") or entry.get("published_date") or "").strip()
         if not url or url in seen:
             continue
         seen.add(url)
-        items.append({"title": title[:120], "url": url})
+        if len(snippet) > _SNIPPET_LIMIT:
+            snippet = snippet[:_SNIPPET_LIMIT].rstrip() + "…"
+        items.append(
+            {
+                "title": title[:120],
+                "url": url,
+                "snippet": snippet,
+                "published_at": published_at[:64],
+            }
+        )
     return items
 
 
@@ -232,22 +288,27 @@ class WebSearchTool:
     ) -> tuple[str, list[SourceItem]]:
         response = self.client.search(query=query, max_results=max_results, timeout=25)
         raw_sources: list[SourceItem] = []
-        raw_lines: dict[str, str] = {}
         for item in response.get("results", []):
             if not isinstance(item, dict):
                 continue
             url = str(item.get("url", "")).strip()
             title = str(item.get("title") or url or "Без названия").strip()
             content = str(item.get("content", "")).strip().replace("\n", " ")
-            if url:
-                raw_sources.append({"title": title[:120], "url": url})
-                raw_lines[url] = f"{title}\nURL: {url}\nКонтент: {content}"
-            elif content:
-                # Untitled snippets cannot be relevance-checked by title; skip structured list.
+            published_at = extract_published_at(item)
+            if not url:
                 continue
+            if len(content) > _SNIPPET_LIMIT:
+                content = content[:_SNIPPET_LIMIT].rstrip() + "…"
+            raw_sources.append(
+                {
+                    "title": title[:120],
+                    "url": url,
+                    "snippet": content,
+                    "published_at": published_at,
+                }
+            )
         kept = filter_relevant_sources(relevance_query or query, raw_sources)
-        lines = [raw_lines[item["url"]] for item in kept if item["url"] in raw_lines]
-        return "\n\n".join(lines), kept
+        return format_evidence_cards(kept), kept
 
 
 class TavilyWebSearch:
