@@ -125,6 +125,17 @@ Retrieval больше не декорация для ссылок:
    режет черновики с датами вне источников или явно устаревшими относительно evidence.
 6. Логи: `evidence_snippets` / `evidence_chars` перед Researcher и Writer.
 
+## Freshness retrieval
+
+Для запросов с маркерами актуальности (`topic_needs_freshness`):
+
+- Tavily вызывается с `topic=news` (env `TAVILY_NEWS_TOPIC`) и `days=TAVILY_FRESHNESS_DAYS` (default **2**).
+- Если `days` вернул пусто — fallback `start_date = today - window`.
+- Источники ранжируются по свежести; старше окна отбрасываются, если есть хотя бы один свежий;
+  иначе WARNING о деградации и лучшие из доступных.
+- Writer явно помечает дату самых свежих данных, если они старше окна (не выдаёт июль за «сегодня»).
+- Логи: `tavily_days`, `source_date_range=min..max`.
+
 ## Progress indicators (живой UX)
 
 Пока граф работает 10–30 секунд, бот обновляет **одно** сервисное сообщение:
@@ -216,6 +227,8 @@ ENABLED_MODULES=self_diagnostics,background_worker,web_search
 | `LLM_PROVIDER` | опционально | `openai` (default) или `deepseek` |
 | `MODEL_NAME` | опционально | например `gpt-4o-mini` / `deepseek-chat` |
 | `TAVILY_API_KEY` | рекомендуется | живой веб-поиск |
+| `TAVILY_FRESHNESS_DAYS` | опционально | окно свежести для «сегодня/сейчас» (default 2) |
+| `TAVILY_NEWS_TOPIC` | опционально | Tavily topic для freshness (`news` default) |
 | `ADMIN_PASSWORD` | обязательно | Basic Auth для FastAPI admin |
 | `REDIS_URL` | опционально | очередь ARQ |
 | `AGENT_DB_PATH` | опционально | путь к SQLite |

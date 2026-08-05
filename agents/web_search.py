@@ -11,6 +11,15 @@ from typing import Any, TypedDict
 from tavily import TavilyClient
 from tavily.errors import TimeoutError as TavilyTimeoutError
 
+from agents.freshness import (
+    apply_freshness_ranking,
+    freshness_start_date,
+    get_tavily_freshness_days,
+    get_tavily_news_topic,
+    source_date_range,
+    topic_needs_freshness,
+)
+
 logger = logging.getLogger(__name__)
 
 # Leading interrogatives that poison Tavily ranking toward dictionary pages.
@@ -208,29 +217,42 @@ def evidence_stats(sources: list[SourceItem] | list[dict[str, Any]] | None) -> t
 def filter_relevant_sources(
     query: str,
     sources: list[SourceItem] | list[dict[str, Any]] | None,
+    *,
+    require_freshness: bool | None = None,
+    freshness_days: int | None = None,
 ) -> list[SourceItem]:
-    """Drop sources whose title/snippet share no significant terms with the query."""
+    """Drop irrelevant titles; for freshness queries also rank/filter by recency."""
     query_terms = significant_terms(query)
     normalized = normalize_source_items(list(sources or []))
-    if not query_terms:
-        return normalized
+    if query_terms:
+        kept: list[SourceItem] = []
+        for item in normalized:
+            title = str(item.get("title") or "")
+            snippet = str(item.get("snippet") or "")
+            title_terms = significant_terms(f"{title} {snippet}")
+            overlap = query_terms & title_terms
+            if not overlap:
+                logger.info(
+                    "source relevance filter: drop title=%r url=%r reason=no_term_overlap query_terms=%s",
+                    title[:120],
+                    str(item.get("url") or "")[:180],
+                    sorted(query_terms)[:12],
+                )
+                continue
+            kept.append(item)
+        normalized = kept
 
-    kept: list[SourceItem] = []
-    for item in normalized:
-        title = str(item.get("title") or "")
-        snippet = str(item.get("snippet") or "")
-        title_terms = significant_terms(f"{title} {snippet}")
-        overlap = query_terms & title_terms
-        if not overlap:
-            logger.info(
-                "source relevance filter: drop title=%r url=%r reason=no_term_overlap query_terms=%s",
-                title[:120],
-                str(item.get("url") or "")[:180],
-                sorted(query_terms)[:12],
-            )
-            continue
-        kept.append(item)
-    return kept
+    need_fresh = (
+        topic_needs_freshness(query)
+        if require_freshness is None
+        else bool(require_freshness)
+    )
+    ranked, _degraded = apply_freshness_ranking(
+        list(normalized),
+        require_freshness=need_fresh,
+        days=freshness_days,
+    )
+    return normalize_source_items(ranked)
 
 
 def normalize_source_items(raw: list[Any] | None) -> list[SourceItem]:
@@ -285,10 +307,54 @@ class WebSearchTool:
         max_results: int = 3,
         *,
         relevance_query: str | None = None,
+        require_freshness: bool | None = None,
     ) -> tuple[str, list[SourceItem]]:
-        response = self.client.search(query=query, max_results=max_results, timeout=25)
+        rel_query = relevance_query or query
+        need_fresh = (
+            topic_needs_freshness(rel_query)
+            if require_freshness is None
+            else bool(require_freshness)
+        )
+        days = get_tavily_freshness_days() if need_fresh else None
+        news_topic = get_tavily_news_topic() if need_fresh else None
+
+        search_kwargs: dict[str, Any] = {
+            "query": query,
+            "max_results": max_results,
+            "timeout": 25,
+        }
+        if need_fresh:
+            search_kwargs["topic"] = news_topic
+            search_kwargs["days"] = days
+
+        logger.info(
+            "Tavily request tavily_days=%s topic=%s need_freshness=%s query=%r",
+            days,
+            news_topic or "general",
+            need_fresh,
+            query[:180],
+        )
+        response = self.client.search(**search_kwargs)
+        results = response.get("results", []) if isinstance(response, dict) else []
+        if need_fresh and not results:
+            start = freshness_start_date(days)
+            logger.warning(
+                "Tavily days=%s returned empty; fallback start_date=%s",
+                days,
+                start,
+            )
+            fallback_kwargs = {
+                "query": query,
+                "max_results": max_results,
+                "timeout": 25,
+                "topic": news_topic,
+                "start_date": start,
+            }
+            response = self.client.search(**fallback_kwargs)
+            results = response.get("results", []) if isinstance(response, dict) else []
+
         raw_sources: list[SourceItem] = []
-        for item in response.get("results", []):
+        for item in results:
             if not isinstance(item, dict):
                 continue
             url = str(item.get("url", "")).strip()
@@ -307,7 +373,20 @@ class WebSearchTool:
                     "published_at": published_at,
                 }
             )
-        kept = filter_relevant_sources(relevance_query or query, raw_sources)
+        kept = filter_relevant_sources(
+            rel_query,
+            raw_sources,
+            require_freshness=need_fresh,
+            freshness_days=days,
+        )
+        dmin, dmax = source_date_range(kept)
+        logger.info(
+            "Tavily sources tavily_days=%s source_date_range=%s..%s count=%s",
+            days,
+            dmin or "n/a",
+            dmax or "n/a",
+            len(kept),
+        )
         return format_evidence_cards(kept), kept
 
 

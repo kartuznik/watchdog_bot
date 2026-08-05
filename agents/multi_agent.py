@@ -11,6 +11,10 @@ from typing import Any, Literal, TypedDict, cast
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 
+from agents.freshness import (
+    freshness_honesty_note,
+    topic_needs_freshness,
+)
 from agents.llm_config import LLMConfig
 from agents.metrics import observe_llm_fallback, observe_router_decision
 from agents.router import merge_router_decision
@@ -61,19 +65,6 @@ class MultiAgentState(TypedDict):
     router_reason: str
 
 
-_FRESHNESS_MARKERS = (
-    "сегодня",
-    "сейчас",
-    "последн",
-    "текущ",
-    "свеж",
-    "live",
-    "breaking",
-    "today",
-    "latest",
-    "current",
-)
-
 _GROUNDING_SYSTEM = (
     "ЖЁСТКИЕ ПРАВИЛА ЗАЗЕМЛЕНИЯ:\n"
     "1) Факты и даты бери ТОЛЬКО из блока SOURCE_EVIDENCE (сниппеты и published_at).\n"
@@ -84,9 +75,8 @@ _GROUNDING_SYSTEM = (
 )
 
 
-def topic_needs_freshness(topic: str) -> bool:
-    text = (topic or "").strip().lower()
-    return any(marker in text for marker in _FRESHNESS_MARKERS)
+# Re-export for tests/back-compat.
+__all__ = ["topic_needs_freshness"]
 
 
 def extract_year_mentions(text: str) -> set[int]:
@@ -333,13 +323,21 @@ def _mock_writer(state: MultiAgentState) -> dict[str, str]:
     research_data = state["research_data"]
     evidence = list(state.get("source_evidence") or state.get("web_sources") or [])
     feedback = state["feedback"].strip()
+    honesty = freshness_honesty_note(topic, evidence)
     if evidence and not feedback:
-        # Grounded mock: surface first snippet facts/dates into the draft for tests.
         card = evidence[0]
         published = str(card.get("published_at") or "").strip() or "дата не указана"
         snippet = str(card.get("snippet") or "").strip()
+        prefix = ""
+        if honesty:
+            # Surface the freshest dated marker honestly for tests/UX.
+            from agents.freshness import source_item_date
+
+            dates = [d for d in (source_item_date(e) for e in evidence) if d]
+            newest = max(dates).isoformat() if dates else published
+            prefix = f"Самые свежие данные на {newest} (не новости текущего дня). "
         draft = (
-            f"По теме «{topic}» согласно источнику «{card.get('title', '')}» "
+            f"{prefix}По теме «{topic}» согласно источнику «{card.get('title', '')}» "
             f"({published}): {snippet}"
         )
         return {"draft": draft}
@@ -616,6 +614,7 @@ async def writer_node(state: MultiAgentState) -> dict[str, str | int | float]:
 
     feedback = state["feedback"].strip() or "Нет обратной связи."
     is_creative = str(state.get("router_mode") or "") == "creative" and not evidence
+    honesty = freshness_honesty_note(state["topic"], evidence)
     if is_creative:
         user_prompt = (
             f"Тема: {state['topic']}\n\n"
@@ -628,14 +627,18 @@ async def writer_node(state: MultiAgentState) -> dict[str, str | int | float]:
             "Это креативный режим — не выдумывай новостные факты и даты."
         )
     else:
+        honesty_block = f"\n{honesty}\n" if honesty else ""
         user_prompt = (
             f"Тема: {state['topic']}\n\n"
             f"SOURCE_EVIDENCE:\n{_evidence_block(state)}\n\n"
             f"GROUNDED_SYNTHESIS:\n{state['research_data']}\n\n"
+            f"{honesty_block}"
             f"Обратная связь ревьюера: {feedback}\n\n"
             "Напиши финальный ответ в 3-5 коротких абзацах. "
             "Каждый факт и каждая дата — только из SOURCE_EVIDENCE. "
             "Если evidence не покрывает вопрос — скажи об этом прямо. "
+            "Если выше есть ВНИМАНИЕ о устаревших данных — обязательно явно укажи "
+            "дату самых свежих данных в ответе. "
             "НЕ добавляй список источников и НЕ используй markdown-заголовки с # — "
             "источники уйдут отдельным сообщением."
         )
