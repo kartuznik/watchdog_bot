@@ -1,115 +1,115 @@
-# Watchdog Bot Runbook
+# Watchdog Bot — Runbook
 
-Operational guide for self-hosted deployments. No secrets, hostnames, or IPs are documented here — use your environment’s `.env` and compose project.
+Операционное руководство для self-hosted деплоя. Секреты, hostname и IP сюда не пишем — используйте `.env` и Compose-проект окружения.
 
 ## Deploy
 
-1. Clone the repository and create `.env` from `.env.example`.
-2. Required: `TELEGRAM_BOT_TOKEN`, at least one LLM key (`OPENAI_API_KEY` and/or `DEEPSEEK_API_KEY`), `ADMIN_PASSWORD`.
-3. Recommended: `OWNER_ID`, `TAVILY_API_KEY`, `TELEGRAM_ALERT_CHAT_ID` (usually same as `OWNER_ID`), `GRAFANA_ADMIN_PASSWORD`.
-4. Start stack:
+1. Клонируйте репозиторий и создайте `.env` из `.env.example`.
+2. Обязательно: `TELEGRAM_BOT_TOKEN`, хотя бы один LLM-ключ (`OPENAI_API_KEY` и/или `DEEPSEEK_API_KEY`), `ADMIN_PASSWORD`.
+3. Рекомендуется: `OWNER_ID`, `TAVILY_API_KEY`, `TELEGRAM_ALERT_CHAT_ID` (обычно тот же, что `OWNER_ID`), `GRAFANA_ADMIN_PASSWORD`.
+4. Запуск стека:
 
 ```bash
 docker compose up -d --build
 docker compose ps
 ```
 
-5. Verify:
-   - Bot polling logs are healthy (`docker compose logs --tail=100 bot`).
-   - Metrics scrape target is up in Prometheus.
-   - Admin panel answers Basic Auth on the admin service port.
-   - Grafana loads the **Watchdog Bot Overview** dashboard (folder **Watchdog**) and alerting contact point `telegram-owner`.
+5. Проверка:
+   - Логи polling бота здоровы (`docker compose logs --tail=100 bot`).
+   - Цель scrape в Prometheus в состоянии up.
+   - Admin panel отвечает Basic Auth на порту admin-сервиса.
+   - Grafana открывает дашборд **Watchdog Bot Overview** (папка **Watchdog**) и contact point `telegram-owner`.
 
-After code changes that affect runtime, rebuild only the touched services, for example:
+После изменений кода, влияющих на runtime, пересобирайте только затронутые сервисы, например:
 
 ```bash
 docker compose up -d --build bot worker admin-panel grafana
 ```
 
-## Backup (database and configuration)
+## Backup (база и конфигурация)
 
-### SQLite memory
+### SQLite (память агента)
 
-- Default path inside containers: `/app/data/agent_memory.db` (host bind: `./data`).
-- WAL mode is enabled; for a consistent copy stop writers briefly or use SQLite backup API.
+- Путь по умолчанию внутри контейнеров: `/app/data/agent_memory.db` (host bind: `./data`).
+- Включён WAL; для согласованной копии кратко остановите writers или используйте SQLite backup API.
 
-Suggested cold backup:
+Холодный backup:
 
 ```bash
 docker compose stop bot worker admin-panel
 cp ./data/agent_memory.db ./backups/agent_memory-$(date +%Y%m%d).db
-# also copy -wal/-shm if present while stopped
+# также скопируйте -wal/-shm, если они есть, пока сервисы остановлены
 docker compose start bot worker admin-panel
 ```
 
-### Configuration
+### Конфигурация
 
-- Back up `.env` out-of-band (secrets manager / encrypted store). Never commit it.
-- Compose and `monitoring/` are in git; restore by redeploying the same revision.
+- `.env` храните вне git (secrets manager / шифрованное хранилище). Никогда не коммитьте.
+- Compose и `monitoring/` в git; восстановление — повторный деплой той же ревизии.
 
 ### Retention
 
-- `DATA_RETENTION_DAYS` (default `90`) controls hard purge of soft-deleted rows and aged `usage_events`.
+- `DATA_RETENTION_DAYS` (по умолчанию `90`) управляет hard purge soft-deleted строк и устаревших `usage_events`.
 - Admin: `POST /api/retention/purge` (Basic Auth).
 
-## API key rotation
+## Ротация API-ключей
 
-Rotate one provider at a time; keep the other key valid so LLM fallback can cover the cutover.
+Ротируйте одного провайдера за раз; второй ключ держите валидным, чтобы LLM fallback перекрыл cutover.
 
-| Secret | Steps |
+| Секрет | Шаги |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | Issue new token in BotFather → update `.env` → recreate `bot` (and Grafana if alerts use the same token). Old token invalidates polling. |
-| `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | Create new key → update `.env` → recreate `bot` and `worker` → revoke old key after smoke. |
-| `TAVILY_API_KEY` | Update `.env` → recreate `bot` and `worker`. Invalid keys soft-fail search only. |
-| `ADMIN_PASSWORD` | Update `.env` → recreate `admin-panel`. |
-| `GRAFANA_ADMIN_PASSWORD` | Update `.env` → recreate `grafana`. |
-| `TELEGRAM_ALERT_CHAT_ID` | Set to the owner chat/user id → recreate `grafana`. |
+| `TELEGRAM_BOT_TOKEN` | Новый токен в BotFather → обновить `.env` → recreate `bot` (и Grafana, если алерты используют тот же токен). Старый токен инвалидирует polling. |
+| `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | Создать новый ключ → обновить `.env` → recreate `bot` и `worker` → отозвать старый ключ после smoke. |
+| `TAVILY_API_KEY` | Обновить `.env` → recreate `bot` и `worker`. Невалидный ключ — soft-fail только поиска. |
+| `ADMIN_PASSWORD` | Обновить `.env` → recreate `admin-panel`. |
+| `GRAFANA_ADMIN_PASSWORD` | Обновить `.env` → recreate `grafana`. |
+| `TELEGRAM_ALERT_CHAT_ID` | Указать chat/user id владельца → recreate `grafana`. |
 
-Never paste live keys into git, issues, or chat logs.
+Живые ключи не вставлять в git, issues и логи чата.
 
-## Incident response
+## Инциденты
 
-### High error rate (Grafana: HighErrorRate)
+### Высокий error rate (Grafana: HighErrorRate)
 
-- Threshold: failed / (failed + success) **> 5%** on a **5m** window.
-- Check bot/worker logs, LLM provider status, and recent deploys.
-- Confirm metrics: `agent_requests_failed_total`, `agent_requests_total`.
-- Mitigate: roll back image/revision, fix provider keys, temporarily disable heavy modules via `ENABLED_MODULES`.
+- Порог: failed / (failed + success) **> 5%** на окне **5m**.
+- Смотрите логи bot/worker, статус LLM-провайдера и недавние деплои.
+- Метрики: `agent_requests_failed_total`, `agent_requests_total`.
+- Mitigation: откат image/ревизии, починить ключи провайдера, временно отключить тяжёлые модули через `ENABLED_MODULES`.
 
-### Async queue lag (Grafana: AsyncQueueLag)
+### Лаг async-очереди (Grafana: AsyncQueueLag)
 
-- Threshold: `agent_async_queue_lag_seconds` **> 300** (5 minutes).
-- Check Redis health, `worker` logs, and `async_tasks` statuses (`queued` / `running`).
-- Mitigate: scale/restart `worker`, clear stuck jobs carefully, reduce heavy-request load.
+- Порог: `agent_async_queue_lag_seconds` **> 300** (5 минут).
+- Проверьте здоровье Redis, логи `worker` и статусы `async_tasks` (`queued` / `running`).
+- Mitigation: scale/restart `worker`, аккуратно снять зависшие jobs, снизить нагрузку тяжёлыми запросами.
 
 ### LLM provider fallback (Grafana: LLMProviderFallback)
 
-- Threshold: `sum(increase(agent_llm_fallback_total[10m]))` **> 0**.
-- Primary provider auth/balance/network failed; secondary was used.
-- Mitigate: restore primary key/balance; confirm both providers in `.env`; watch `agent_llm_fallback_total`.
+- Порог: `sum(increase(agent_llm_fallback_total[10m]))` **> 0**.
+- Primary провайдер упал по auth/balance/network; использован secondary.
+- Mitigation: восстановить primary ключ/баланс; убедиться, что оба провайдера в `.env`; смотреть `agent_llm_fallback_total`.
 
-### Bot down / Telegram conflicts
+### Бот недоступен / конфликты Telegram
 
-- Single polling instance per bot token.
-- Health/monitor loops (when `self_diagnostics` enabled) can notify `OWNER_ID` independently of Grafana.
+- Один polling-инстанс на один bot token.
+- Health/monitor loops (если включён `self_diagnostics`) могут уведомить `OWNER_ID` независимо от Grafana.
 
-### Soft-delete / data requests
+### Soft-delete / запросы на данные
 
-- Default `/clear` and admin clear are **soft** (`deleted_at`).
-- Admin soft-delete user: `POST /api/users/{id}/soft_delete`.
-- Optional gate `SOFT_DELETE_GATE=true` blocks soft-deleted users from the bot (off by default).
-- Hard purge only via retention job or `hard=true` on clear (use sparingly).
+- По умолчанию `/clear` и admin clear — **soft** (`deleted_at`).
+- Soft-delete пользователя в admin: `POST /api/users/{id}/soft_delete`.
+- Опциональный gate `SOFT_DELETE_GATE=true` блокирует soft-deleted пользователей в боте (по умолчанию выкл.).
+- Hard purge только через retention job или `hard=true` на clear (использовать редко).
 
 ## Rollback
 
-1. Identify last known-good git revision.
-2. `git checkout <revision>` (or redeploy the previous image tag).
-3. `docker compose up -d --build` for affected services.
-4. Restore SQLite from backup if the schema/data migration is incompatible.
-5. Smoke: creative (no search) + factual (search) Telegram requests; hit admin `/api/stats` and `/api/usage`.
+1. Найдите последнюю known-good git-ревизию.
+2. `git checkout <revision>` (или задеплойте предыдущий image tag).
+3. `docker compose up -d --build` для затронутых сервисов.
+4. Восстановите SQLite из backup, если schema/data migration несовместима.
+5. Smoke: креативный запрос (без поиска) + фактологический (с поиском) в Telegram; проверьте admin `/api/stats` и `/api/usage`.
 
-## Alerting notes
+## Заметки по алертингу
 
-- Grafana contact point uses `$__env{TELEGRAM_BOT_TOKEN}` and `$__env{TELEGRAM_ALERT_CHAT_ID}` — no tokens in YAML.
-- Unified alerting must stay enabled (`GF_UNIFIED_ALERTING_ENABLED=true`).
-- In-bot health alerts to `OWNER_ID` remain a complementary path when Grafana is unavailable.
+- Grafana contact point использует `$__env{TELEGRAM_BOT_TOKEN}` и `$__env{TELEGRAM_ALERT_CHAT_ID}` — токенов в YAML нет.
+- Unified alerting должен быть включён (`GF_UNIFIED_ALERTING_ENABLED=true`).
+- In-bot health-алерты на `OWNER_ID` — дополнительный канал, когда Grafana недоступна.
