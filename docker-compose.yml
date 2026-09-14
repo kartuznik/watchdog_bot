@@ -12,7 +12,7 @@ services:
     volumes:
       - ./data:/app/data
     ports:
-      - "8011:8001"
+      - "127.0.0.1:8011:8001"
     depends_on:
       - redis
       - worker
@@ -47,7 +47,7 @@ services:
     volumes:
       - ./data:/app/data
     ports:
-      - "8004:8004"
+      - "127.0.0.1:8004:8004"
     depends_on:
       - bot
     restart: unless-stopped
@@ -65,7 +65,7 @@ services:
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9091:9090"
+      - "127.0.0.1:9091:9090"
     depends_on:
       - bot
     restart: unless-stopped
@@ -74,7 +74,7 @@ services:
     image: grafana/grafana:latest
     user: "0:0"
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro

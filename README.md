@@ -261,10 +261,12 @@ python -m telegram_bot.main
 
 ## Мониторинг и алерты
 
-- **Web Admin**: `:8004` (user `admin` + `ADMIN_PASSWORD`)
-- **Bot metrics**: host `:8011` → container `:8001`
-- **Prometheus**: `:9091`
-- **Grafana**: `:3001` (contact point `telegram-owner` через env, без секретов в YAML)
+Все четыре порта публикуются только на петлю (`127.0.0.1:<port>` в `docker-compose.yml`): наружу они не нужны — Prometheus скрейпит бота по сети Compose (`bot:8001`), а человеку доступ дают ssh-туннелем, например `ssh -N -L 3001:127.0.0.1:3001 root@<YOUR_HOST> -p 2222`.
+
+- **Web Admin**: `127.0.0.1:8004` (user `admin` + `ADMIN_PASSWORD`)
+- **Bot metrics**: host `127.0.0.1:8011` → container `:8001`
+- **Prometheus**: `127.0.0.1:9091`
+- **Grafana**: `127.0.0.1:3001` (contact point `telegram-owner` через env, без секретов в YAML)
 
 Метрики:
 
